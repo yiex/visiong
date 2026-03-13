@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+#ifndef VISIONG_COMMON_BUILD_CONFIG_H
+#define VISIONG_COMMON_BUILD_CONFIG_H
+
+// Build-time component switches / 构建期组件开关
+#define VISIONG_VERSION_STRING "@VISIONG_VERSION@"
+#cmakedefine01 VISIONG_WITH_IVE
+#cmakedefine01 VISIONG_WITH_NPU
+#cmakedefine01 VISIONG_WITH_GUI
+
+#endif  // VISIONG_COMMON_BUILD_CONFIG_H

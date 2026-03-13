@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Generated VisionG imported targets / 自动生成的 VisionG 导入目标
+get_filename_component(_VISIONG_PACKAGE_PREFIX "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(_VISIONG_PACKAGE_INCLUDE_DIR "${_VISIONG_PACKAGE_PREFIX}/include")
+
+if(EXISTS "${_VISIONG_PACKAGE_PREFIX}/lib/libvisiong.so" AND NOT TARGET VisionG::visiong)
+    add_library(VisionG::visiong SHARED IMPORTED)
+    set_target_properties(VisionG::visiong PROPERTIES
+        IMPORTED_LOCATION "${_VISIONG_PACKAGE_PREFIX}/lib/libvisiong.so"
+        INTERFACE_INCLUDE_DIRECTORIES "${_VISIONG_PACKAGE_INCLUDE_DIR}"
+    )
+endif()
+
+if(EXISTS "${_VISIONG_PACKAGE_PREFIX}/lib/libvisiong.a" AND NOT TARGET VisionG::visiong_static)
+    add_library(VisionG::visiong_static STATIC IMPORTED)
+    set_target_properties(VisionG::visiong_static PROPERTIES
+        IMPORTED_LOCATION "${_VISIONG_PACKAGE_PREFIX}/lib/libvisiong.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${_VISIONG_PACKAGE_INCLUDE_DIR}"
+    )
+endif()

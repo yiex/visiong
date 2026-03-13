@@ -1,0 +1,10 @@
+build export-ignore
+dist export-ignore
+_stage export-ignore
+_deps export-ignore
+vendor export-ignore
+lib export-ignore
+toolchain export-ignore
+opencv-mobile export-ignore
+visiong_runtime_bundle.zip export-ignore
+*.log export-ignore

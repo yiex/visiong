@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "last_reviewed": "2026-03-13",
+  "default_public_binary_release": true,
+  "staged_libraries": [
+    {
+      "filename": "librga.so",
+      "path": "lib/librga.so",
+      "classification": "review-required",
+      "default_public_release": false,
+      "reason": "Public upstream exists, but staged binary provenance and notice set must be reviewed before any redistribution"
+    },
+    {
+      "filename": "librga.a",
+      "path": "lib/librga.a",
+      "classification": "review-required",
+      "default_public_release": false,
+      "reason": "Static vendor binary; review provenance and downstream obligations before any redistribution"
+    },
+    {
+      "filename": "librkaiq.so",
+      "path": "lib/librkaiq.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor SDK binary; keep out of public releases"
+    },
+    {
+      "filename": "librkaiq.a",
+      "path": "lib/librkaiq.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor SDK static library; keep out of public releases"
+    },
+    {
+      "filename": "librknnmrt.so",
+      "path": "lib/librknnmrt.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "RKNN runtime is distribution-sensitive; do not publish it directly"
+    },
+    {
+      "filename": "librknnmrt.a",
+      "path": "lib/librknnmrt.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "RKNN runtime static library is distribution-sensitive; do not publish it directly"
+    },
+    {
+      "filename": "librockchip_mpp.so.1",
+      "path": "lib/librockchip_mpp.so.1",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor media stack binary; keep out of public releases"
+    },
+    {
+      "filename": "librockchip_mpp.so.0",
+      "path": "lib/librockchip_mpp.so.0",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor media stack binary; keep out of public releases"
+    },
+    {
+      "filename": "librockchip_mpp.a",
+      "path": "lib/librockchip_mpp.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor media stack static library; keep out of public releases"
+    },
+    {
+      "filename": "librockit.so",
+      "path": "lib/librockit.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor middleware binary; keep out of public releases"
+    },
+    {
+      "filename": "librockit.a",
+      "path": "lib/librockit.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor middleware static library; keep out of public releases"
+    },
+    {
+      "filename": "librockiva.so",
+      "path": "lib/librockiva.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor IVA runtime; keep out of public releases"
+    },
+    {
+      "filename": "librockiva.a",
+      "path": "lib/librockiva.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Vendor IVA static library; keep out of public releases"
+    },
+    {
+      "filename": "librtsp.a",
+      "path": "lib/librtsp.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "Prebuilt static RTSP library is unnecessary for release because source is already retained in-tree"
+    },
+    {
+      "filename": "librve.so",
+      "path": "3rdparty/ive/ive/lib/librve.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "IVE vendor runtime; keep out of public releases"
+    },
+    {
+      "filename": "librve.a",
+      "path": "3rdparty/ive/ive/lib/librve.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "IVE vendor static library; keep out of public releases"
+    },
+    {
+      "filename": "libivs.so",
+      "path": "3rdparty/ive/ive/lib/libivs.so",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "IVE vendor runtime; keep out of public releases"
+    },
+    {
+      "filename": "libivs.a",
+      "path": "3rdparty/ive/ive/lib/libivs.a",
+      "classification": "forbidden-by-default",
+      "default_public_release": false,
+      "reason": "IVE vendor static library; keep out of public releases"
+    }
+  ],
+  "project_outputs": [
+    {
+      "filename": "_visiong.so",
+      "path": "build/_visiong.so",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Published inside visiong_python.zip as the Python extension; the minimal OpenCV subset is linked statically, while required Rockchip runtime libraries stay external to the release"
+    },
+    {
+      "filename": "visiong.py",
+      "path": "build/visiong.py",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Published inside visiong_python.zip as the Python loader entry point"
+    },
+    {
+      "filename": "libvisiong.so",
+      "path": "build/libvisiong.so",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Published inside visiong_cpp.zip as the shared C/C++ library; the minimal OpenCV subset is linked statically, while required Rockchip runtime libraries stay external to the release"
+    },
+    {
+      "filename": "libvisiong.a",
+      "path": "build/libvisiong.a",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Published inside visiong_cpp.zip as the static C/C++ library for downstream integration; staged vendor libraries are still not bundled"
+    },
+    {
+      "filename": "visiong_cpp.zip",
+      "path": "visiong_cpp.zip",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Primary public C/C++ release archive containing headers, libraries, CMake package files, and notices"
+    },
+    {
+      "filename": "visiong_python.zip",
+      "path": "visiong_python.zip",
+      "classification": "public-release",
+      "default_public_release": true,
+      "reason": "Primary public Python release archive containing _visiong.so, visiong.py, and notices"
+    }
+  ],
+  "allowed_release_artifacts": [
+    "visiong_cpp.zip",
+    "visiong_python.zip"
+  ]
+}

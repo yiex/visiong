@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "last_reviewed": "2026-03-13",
+  "public_release_mode": "source-and-dynamic-binaries",
+  "in_tree_third_party": [
+    {
+      "name": "media-server",
+      "path": "3rdparty/media-server",
+      "license": "MIT",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "RTSP/FLV/MOV helper code retained in-tree"
+    },
+    {
+      "name": "nuklear",
+      "path": "3rdparty/nuklear",
+      "license": "MIT or Public Domain",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "Immediate-mode GUI single-header dependency"
+    },
+    {
+      "name": "pybind11",
+      "path": "3rdparty/pybind11",
+      "license": "BSD-3-Clause",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "Python binding headers retained in-tree"
+    },
+    {
+      "name": "quirc",
+      "path": "3rdparty/quirc",
+      "license": "ISC",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "QR code detection/decoding library"
+    },
+    {
+      "name": "stb",
+      "path": "3rdparty/stb",
+      "license": "MIT or Public Domain",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "Image loading/writing single-header dependency"
+    },
+    {
+      "name": "target Python sysroot subset",
+      "path": "3rdparty/target_python",
+      "license": "PSF-2.0",
+      "requires_local_license": false,
+      "public_source_release": false,
+      "notes": "Repository-local minimal Python 3.11 target sysroot subset used for cross-building the extension; excluded from public source archives"
+    },
+    {
+      "name": "OpenCV prebuilt subset",
+      "path": "3rdparty/opencv",
+      "license": "Apache-2.0 and bundled third-party notices",
+      "requires_local_license": false,
+      "public_source_release": false,
+      "notes": "Repository-local RV1106 OpenCV subset used to avoid rebuilding OpenCV in CI; excluded from public source archives"
+    }
+  ],
+  "project_owned_replacements": [
+    {
+      "name": "DMA allocator replacement",
+      "path": "src/common/internal/dma_alloc.cpp",
+      "notes": "Project-owned replacement for earlier SDK-derived DMA helper code"
+    },
+    {
+      "name": "IVE memory helper replacement",
+      "path": "src/modules/internal/ive_memory.cpp",
+      "notes": "Project-owned replacement for earlier SDK-derived IVE memory/sample helpers"
+    },
+    {
+      "name": "Internal C compatibility helpers",
+      "path": "src/c_compat",
+      "notes": "Project-owned internal helpers used by bundled third-party C sources"
+    }
+  ],
+  "external_build_only": [
+    {
+      "name": "Luckfox/Rockchip SDK headers and runtime libraries",
+      "staged_paths": ["vendor/rockchip/include", "lib"],
+      "repo_paths_must_be_absent": ["vendor", "include/rockchip", "include/rkaiq"],
+      "public_source_release": false,
+      "notes": "Build-time only; keep out of the public source archive and keep staged vendor libraries out of release assets"
+    },
+    {
+      "name": "RKNN Toolkit2 headers and runtime libraries",
+      "staged_paths": ["vendor/rknpu2/include", "lib/librknnmrt.so", "lib/librknnmrt.a"],
+      "repo_paths_must_be_absent": ["3rdparty/rknpu2", "include/rknn"],
+      "public_source_release": false,
+      "notes": "Treat as distribution-sensitive unless you have explicit redistribution confirmation"
+    },
+    {
+      "name": "librga headers and runtime libraries",
+      "staged_paths": ["vendor/librga/include", "lib/librga.so", "lib/librga.a"],
+      "repo_paths_must_be_absent": ["3rdparty/librga"],
+      "public_source_release": false,
+      "notes": "Fetched/staged externally; the staged libraries are not published with VisionG release assets"
+    },
+    {
+      "name": "IVE headers and runtime libraries",
+      "staged_paths": ["vendor/ive/include", "3rdparty/ive/ive/lib"],
+      "repo_paths_must_be_absent": ["3rdparty/ive"],
+      "public_source_release": false,
+      "notes": "Fetched/staged externally; the staged libraries are not published with VisionG release assets"
+    },
+    {
+      "name": "optional OpenCV source archive for local regeneration",
+      "staged_paths": ["opencv"],
+      "repo_paths_must_be_absent": ["opencv", "include/opencv4"],
+      "public_source_release": false,
+      "notes": "Kept only as an optional local regeneration path; CI and releases use the repository-local OpenCV subset and the public source archive does not ship staged OpenCV build outputs"
+    }
+  ],
+  "public_release_forbidden_paths": [
+    "_deps",
+    "_stage",
+    "build",
+    "dist",
+    "lib",
+    "opencv",
+    "toolchain",
+    "vendor",
+    "3rdparty/allocator",
+    "3rdparty/ive",
+    "3rdparty/librga",
+    "3rdparty/rknpu2",
+    "3rdparty/rockchip_samples",
+    "examples",
+    "tests"
+  ]
+}

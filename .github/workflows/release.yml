@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag to rebuild and republish"
+        required: false
+        default: ""
+      luckfox_sdk_ref:
+        description: "Luckfox SDK ref"
+        required: false
+        default: "main"
+      rknn_toolkit2_ref:
+        description: "rknn-toolkit2 ref"
+        required: false
+        default: "master"
+      librga_ref:
+        description: "librga ref"
+        required: false
+        default: "main"
+      visiong_enable_ive:
+        description: "Build IVE module (ON/OFF)"
+        required: false
+        default: "ON"
+      visiong_enable_npu:
+        description: "Build NPU module (ON/OFF)"
+        required: false
+        default: "ON"
+      visiong_enable_gui:
+        description: "Build GUI module (ON/OFF)"
+        required: false
+        default: "ON"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_LABEL: ${{ inputs.release_tag || github.ref_name }}
+      LUCKFOX_SDK_REF: ${{ inputs.luckfox_sdk_ref || vars.LUCKFOX_SDK_REF || 'main' }}
+      RKNN_TOOLKIT2_REF: ${{ inputs.rknn_toolkit2_ref || vars.RKNN_TOOLKIT2_REF || 'master' }}
+      LIBRGA_REF: ${{ inputs.librga_ref || vars.LIBRGA_REF || 'main' }}
+      VISIONG_ENABLE_IVE: ${{ inputs.visiong_enable_ive || 'ON' }}
+      VISIONG_ENABLE_NPU: ${{ inputs.visiong_enable_npu || 'ON' }}
+      VISIONG_ENABLE_GUI: ${{ inputs.visiong_enable_gui || 'ON' }}
+
+    steps:
+      - name: Checkout VisionG
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            unzip \
+            zip
+
+      - name: Fetch Luckfox SDK
+        run: |
+          git clone --depth=1 --branch "${LUCKFOX_SDK_REF}" \
+            https://github.com/LuckfoxTECH/luckfox-pico.git _deps/luckfox-pico
+
+      - name: Fetch RKNN Toolkit2
+        run: |
+          git clone --depth=1 --branch "${RKNN_TOOLKIT2_REF}" \
+            https://github.com/airockchip/rknn-toolkit2.git _deps/rknn-toolkit2
+
+      - name: Fetch librga
+        run: |
+          git clone --depth=1 --branch "${LIBRGA_REF}" \
+            https://github.com/airockchip/librga.git _deps/librga
+
+      - name: Stage dependency bundle
+        run: |
+          ./scripts/stage_release_deps.sh \
+            --out _stage \
+            --luckfox-sdk _deps/luckfox-pico \
+            --rknn-toolkit2 _deps/rknn-toolkit2 \
+            --librga _deps/librga
+
+      - name: Build VisionG against staged bundle
+        run: |
+          ./build.sh \
+            --deps-root "${GITHUB_WORKSPACE}/_stage" \
+            --no-package \
+            --cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON \
+            --cmake-arg -DVISIONG_ENABLE_IVE="${VISIONG_ENABLE_IVE}" \
+            --cmake-arg -DVISIONG_ENABLE_NPU="${VISIONG_ENABLE_NPU}" \
+            --cmake-arg -DVISIONG_ENABLE_GUI="${VISIONG_ENABLE_GUI}"
+
+      - name: Assemble binary release packages
+        run: |
+          mkdir -p dist
+          ./scripts/create_release_archives.sh build dist visiong_cpp.zip visiong_python.zip
+
+      - name: Write release notes
+        run: |
+          cat > "${GITHUB_WORKSPACE}/dist/release-notes-${RELEASE_LABEL}.md" <<EOF
+          # VisionG ${RELEASE_LABEL}
+
+          ## Assets
+          - \`visiong_cpp.zip\`
+          - \`visiong_python.zip\`
+
+          ## Build notes
+          - Build toggles: IVE=${VISIONG_ENABLE_IVE}, NPU=${VISIONG_ENABLE_NPU}, GUI=${VISIONG_ENABLE_GUI}.
+          - \`visiong_cpp.zip\` only ships VisionG public headers; external SDK headers are intentionally excluded.
+          - Staged Rockchip SDK, RKNN, librga, and IVE runtime libraries are not published as release assets.
+          - The target board must still provide the required Rockchip runtime libraries.
+          EOF
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: visiong-release-${{ env.RELEASE_LABEL }}
+          path: dist/*.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_LABEL }}
+          name: VisionG ${{ env.RELEASE_LABEL }}
+          target_commitish: ${{ github.sha }}
+          body_path: dist/release-notes-${{ env.RELEASE_LABEL }}.md
+          overwrite_files: true
+          files: dist/*.zip
