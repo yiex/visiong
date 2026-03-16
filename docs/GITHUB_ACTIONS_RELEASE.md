@@ -14,7 +14,7 @@ This repository uses `.github/workflows/release.yml` to verify builds against st
 1. Checkout VisionG source.
 2. Fetch Luckfox SDK, RKNN Toolkit2, and librga.
 3. Run `scripts/stage_release_deps.sh` to stage dependencies into `_stage/`.
-4. Build with `./build.sh --deps-root _stage --no-package --cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON`, plus optional `VISIONG_ENABLE_IVE/NPU/GUI` toggles from workflow inputs.
+4. Build with `./build.sh --deps-root _stage --no-package`, plus optional `VISIONG_ENABLE_IVE/NPU/GUI` toggles from workflow inputs.
 5. Create `visiong_cpp.zip` and `visiong_python.zip` with `scripts/create_release_archives.sh`.
 6. Write release notes from the current build outputs.
 7. Upload/publish the two binary packages.

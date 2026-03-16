@@ -161,12 +161,6 @@ git clone --depth=1 --branch main \
 - `VISIONG_ENABLE_NPU`：控制 RKNN / NPU 模块
 - `VISIONG_ENABLE_GUI`：控制 GUI 模块
 
-如果你的构建环境不提供真实 ISP 控制器实现，也可以按需额外传入：
-
-```bash
---cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON
-```
-
 ## 一个完整的本地构建示例
 
 下面是一套从准备依赖到生成压缩包的完整示例：
@@ -198,7 +192,6 @@ git clone --depth=1 --branch main \
 ./build.sh \
   --deps-root "$PWD/_stage" \
   --no-package \
-  --cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON \
   --cmake-arg -DVISIONG_ENABLE_IVE=ON \
   --cmake-arg -DVISIONG_ENABLE_NPU=ON \
   --cmake-arg -DVISIONG_ENABLE_GUI=ON
@@ -448,13 +441,6 @@ Common switches:
 - `VISIONG_ENABLE_NPU`: controls the RKNN / NPU module
 - `VISIONG_ENABLE_GUI`: controls the GUI module
 
-If your build environment does not provide a real ISP controller implementation,
-you may also add this as needed:
-
-```bash
---cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON
-```
-
 ## A Complete Local Build Example
 
 Below is a full example from dependency preparation to package generation:
@@ -486,7 +472,6 @@ git clone --depth=1 --branch main \
 ./build.sh \
   --deps-root "$PWD/_stage" \
   --no-package \
-  --cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON \
   --cmake-arg -DVISIONG_ENABLE_IVE=ON \
   --cmake-arg -DVISIONG_ENABLE_NPU=ON \
   --cmake-arg -DVISIONG_ENABLE_GUI=ON

@@ -16,9 +16,8 @@ option(VISIONG_ENABLE_FAST_MATH "Enable -ffast-math (may reduce numerical stabil
 option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
-option(VISIONG_USE_STUB_ISP_CONTROLLER "Use fallback ISP controller implementation without full RKAIQ controls." OFF)
 
-set(VISIONG_VERSION "1.0.0" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.0.1" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -365,11 +364,6 @@ set(VISIONG_CORE_SRCS
     src/core/RgaHelper.cpp
 )
 
-set(VISIONG_ISP_CONTROLLER_SOURCE src/modules/ISPController.cpp)
-if(VISIONG_USE_STUB_ISP_CONTROLLER)
-    set(VISIONG_ISP_CONTROLLER_SOURCE src/modules/ISPController_stub.cpp)
-endif()
-
 set(VISIONG_MODULE_BASE_SRCS
     src/modules/DisplayFB.cpp
     src/modules/DisplayHTTP.cpp
@@ -378,7 +372,7 @@ set(VISIONG_MODULE_BASE_SRCS
     src/modules/DisplayUDP.cpp
     src/modules/internal/font_support.cpp
     src/modules/internal/gui_render_utils.cpp
-    ${VISIONG_ISP_CONTROLLER_SOURCE}
+    src/modules/ISPController.cpp
     src/modules/Touch.cpp
     src/modules/VencManager.cpp
     src/modules/VencManagerEncode.cpp

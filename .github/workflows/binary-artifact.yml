@@ -84,7 +84,6 @@ jobs:
           ./build.sh \
             --deps-root "${GITHUB_WORKSPACE}/_stage" \
             --no-package \
-            --cmake-arg -DVISIONG_USE_STUB_ISP_CONTROLLER=ON \
             --cmake-arg -DVISIONG_ENABLE_IVE="${VISIONG_ENABLE_IVE}" \
             --cmake-arg -DVISIONG_ENABLE_NPU="${VISIONG_ENABLE_NPU}" \
             --cmake-arg -DVISIONG_ENABLE_GUI="${VISIONG_ENABLE_GUI}"
