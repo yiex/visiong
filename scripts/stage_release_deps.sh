@@ -231,6 +231,11 @@ stage_vendor_headers() {
 
     local -a roots=("${LUCKFOX_SDK_ROOT}")
 
+    # The Luckfox SDK ships multiple RKAIQ header trees for different SoCs.
+    # VisionG releases target RV1106, so prefer that bundle before any generic scan.
+    copy_tree_if_exists \
+        "${LUCKFOX_SDK_ROOT}/media/isp/release_camera_engine_rkaiq_rv1106_arm-rockchip830-linux-uclibcgnueabihf/include/rkaiq" \
+        "${out_include_dir}/rkaiq" || \
     copy_tree_from_marker_file "rk_aiq_user_api2_sysctl.h" 2 "${out_include_dir}/rkaiq" "${roots[@]}" || true
     copy_tree_from_marker_file "rk_mpi.h" 1 "${out_include_dir}/rockchip" "${roots[@]}" || true
 
