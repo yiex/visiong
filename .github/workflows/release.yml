@@ -57,6 +57,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate NanoTrack source guard
+        run: |
+          python3 ./scripts/check_nanotrack_init_guard.py
+
       - name: Install host packages
         run: |
           sudo apt-get update
@@ -102,6 +106,10 @@ jobs:
         run: |
           mkdir -p dist
           ./scripts/create_release_archives.sh build dist visiong_cpp.zip visiong_python.zip
+
+      - name: Validate binary artifacts
+        run: |
+          python3 ./scripts/check_release_archives.py dist/visiong_cpp.zip dist/visiong_python.zip
 
       - name: Write release notes
         run: |

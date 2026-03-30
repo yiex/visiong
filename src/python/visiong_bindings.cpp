@@ -82,6 +82,6 @@ PYBIND11_MODULE(_visiong, m) {
 #ifdef VERSION_INFO
     m.attr("__version__") = VERSION_INFO;
 #else
-    m.attr("__version__") = "1.0.1";
+    m.attr("__version__") = "1.0.2";
 #endif
 }

@@ -669,9 +669,11 @@ void NanoTrackCore::init(const cv::Mat &img, cv::Rect bbox)
     copy_bgr_to_input_tensor(z_crop, t_input_tensor_);
     std::vector<tensor_data_s> t_inputs;
     t_inputs.push_back(t_input_tensor_);
-    // Run the template backbone    if (t_engine_->Run(t_inputs, t_output_tensors_, t_want_float_) != NN_SUCCESS) / Run template backbone 如果 (t_engine_->Run(t_输入s, t_输出_tensors_, t_want_float_) != NN_SUCCESS)
+    // Run the template backbone.
+    const nn_error_e t_ret = t_engine_->Run(t_inputs, t_output_tensors_, t_want_float_);
+    if (t_ret != NN_SUCCESS)
     {
-        throw std::runtime_error("NanoTrackCore::init template backbone run failed");
+        throw std::runtime_error("NanoTrackCore::init template backbone run failed, ret=" + std::to_string(static_cast<int>(t_ret)));
     }
 
     this->state.channel_ave=avg_chans;
