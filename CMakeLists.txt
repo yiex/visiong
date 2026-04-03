@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.0.2" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.0.3" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -346,6 +346,7 @@ configure_file("${VISIONG_ROOT}/cmake/VisionGConfigVersion.cmake.in" "${CMAKE_BI
 configure_file("${VISIONG_ROOT}/cmake/VisionGTargets.cmake.in" "${CMAKE_BINARY_DIR}/VisionGTargets.cmake" @ONLY)
 
 set(VISIONG_CORE_SRCS
+    src/audio/KwsFrontend.cpp
     src/core/BufferStateMachine.cpp
     src/core/Camera.cpp
     src/core/ImageBuffer.cpp
@@ -405,6 +406,7 @@ set(VISIONG_C_COMPAT_SRCS
 )
 
 set(VISIONG_NPU_SRCS
+    src/npu/KWS.cpp
     src/npu/LowLevelNPU.cpp
     src/npu/NPU.cpp
     src/npu/NanoTrack.cpp
@@ -421,6 +423,7 @@ set(VISIONG_NPU_SRCS
 )
 
 set(VISIONG_PYTHON_BINDING_SRCS
+    src/python/bind_audio.cpp
     src/python/bind_camera_ive.cpp
     src/python/bind_core_image.cpp
     src/python/bind_io_npu_gui.cpp

@@ -232,6 +232,50 @@ bool parse_hwc_from_attr(const rknn_tensor_attr& attr, int* h, int* w, int* c) {
     return false;
 }
 
+bool build_strided_input_copy_plan(const rknn_tensor_attr& attr,
+                                   size_t elem_size,
+                                   int* dst_stride_bytes,
+                                   int* src_stride_bytes,
+                                   int* row_count,
+                                   size_t* packed_bytes) {
+    if (dst_stride_bytes == nullptr || src_stride_bytes == nullptr ||
+        row_count == nullptr || packed_bytes == nullptr) {
+        return false;
+    }
+    if (elem_size == 0 || attr.w_stride == 0 || attr.size_with_stride == 0 || attr.size_with_stride == attr.size) {
+        return false;
+    }
+
+    int h = 0;
+    int w = 0;
+    int c = 0;
+    if (!parse_hwc_from_attr(attr, &h, &w, &c)) {
+        return false;
+    }
+
+    int batch = 1;
+    if (attr.fmt == RKNN_TENSOR_NHWC) {
+        for (uint32_t i = 0; i + 3 < attr.n_dims; ++i) {
+            batch *= std::max(1, static_cast<int>(attr.dims[i]));
+        }
+        *src_stride_bytes = static_cast<int>(w * c * static_cast<int>(elem_size));
+        *dst_stride_bytes = static_cast<int>(std::max(1u, attr.w_stride) * c * static_cast<uint32_t>(elem_size));
+        *row_count = batch * h;
+    } else if (attr.fmt == RKNN_TENSOR_NCHW) {
+        for (uint32_t i = 0; i + 3 < attr.n_dims; ++i) {
+            batch *= std::max(1, static_cast<int>(attr.dims[i]));
+        }
+        *src_stride_bytes = static_cast<int>(w * static_cast<int>(elem_size));
+        *dst_stride_bytes = static_cast<int>(std::max(1u, attr.w_stride) * static_cast<uint32_t>(elem_size));
+        *row_count = batch * c * h;
+    } else {
+        return false;
+    }
+
+    *packed_bytes = static_cast<size_t>(*src_stride_bytes) * static_cast<size_t>(std::max(0, *row_count));
+    return (*dst_stride_bytes > *src_stride_bytes) && (*packed_bytes > 0);
+}
+
 int query_input_attr_with_fallback(rknn_context ctx, uint32_t index, rknn_tensor_attr* attr) {
     if (attr == nullptr) {
         return RKNN_ERR_PARAM_INVALID;
@@ -670,6 +714,7 @@ void LowLevelNPU::set_input_buffer(int index,
     }
 
     rknn_tensor_mem* mem = m_impl->input_mems[idx];
+    rknn_tensor_attr& attr = m_impl->input_attrs[idx];
     if (mem == nullptr || mem->virt_addr == nullptr) {
         throw std::runtime_error("LowLevelNPU: input memory is unavailable at index " + std::to_string(idx));
     }
@@ -683,8 +728,29 @@ void LowLevelNPU::set_input_buffer(int index,
     if (zero_pad) {
         std::memset(mem->virt_addr, 0, capacity);
     }
+
+    const size_t elem_size = tensor_type_size_bytes_impl(attr.type);
+    int dst_stride_bytes = 0;
+    int src_stride_bytes = 0;
+    int row_count = 0;
+    size_t packed_bytes = 0;
+    const bool use_strided_copy =
+        build_strided_input_copy_plan(attr, elem_size, &dst_stride_bytes, &src_stride_bytes, &row_count, &packed_bytes) &&
+        bytes <= packed_bytes && packed_bytes < capacity;
+
     if (bytes > 0) {
-        std::memcpy(mem->virt_addr, data, bytes);
+        if (use_strided_copy) {
+            std::vector<uint8_t> packed(packed_bytes, 0);
+            std::memcpy(packed.data(), data, bytes);
+            copy_data_with_stride(mem->virt_addr,
+                                  dst_stride_bytes,
+                                  packed.data(),
+                                  src_stride_bytes,
+                                  row_count,
+                                  src_stride_bytes);
+        } else {
+            std::memcpy(mem->virt_addr, data, bytes);
+        }
     }
     if (mem->fd >= 0) {
         const auto view = visiong::bufstate::make_dma_view(mem->fd, mem->virt_addr, mem->size);
@@ -727,23 +793,37 @@ void LowLevelNPU::set_input_from_float(int index,
         std::memset(mem->virt_addr, 0, mem->size);
     }
 
+    int dst_stride_bytes = 0;
+    int src_stride_bytes = 0;
+    int row_count = 0;
+    size_t packed_bytes = 0;
+    const bool use_strided_copy =
+        build_strided_input_copy_plan(attr, elem_size, &dst_stride_bytes, &src_stride_bytes, &row_count, &packed_bytes) &&
+        packed_bytes < static_cast<size_t>(mem->size);
+    std::vector<uint8_t> packed;
+    void* write_ptr = mem->virt_addr;
+    if (use_strided_copy) {
+        packed.assign(packed_bytes, 0);
+        write_ptr = packed.data();
+    }
+
     const bool affine_qnt = quantize_if_needed && (attr.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC);
     const float scale = (attr.scale == 0.0f) ? 1.0f : attr.scale;
 
     switch (attr.type) {
         case RKNN_TENSOR_FLOAT32: {
-            std::memcpy(mem->virt_addr, data, copy_elems * sizeof(float));
+            std::memcpy(write_ptr, data, copy_elems * sizeof(float));
             break;
         }
         case RKNN_TENSOR_FLOAT16: {
-            uint16_t* dst = static_cast<uint16_t*>(mem->virt_addr);
+            uint16_t* dst = static_cast<uint16_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 dst[i] = float_to_half_bits(data[i]);
             }
             break;
         }
         case RKNN_TENSOR_INT8: {
-            int8_t* dst = static_cast<int8_t*>(mem->virt_addr);
+            int8_t* dst = static_cast<int8_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -754,7 +834,7 @@ void LowLevelNPU::set_input_from_float(int index,
             break;
         }
         case RKNN_TENSOR_UINT8: {
-            uint8_t* dst = static_cast<uint8_t*>(mem->virt_addr);
+            uint8_t* dst = static_cast<uint8_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -765,7 +845,7 @@ void LowLevelNPU::set_input_from_float(int index,
             break;
         }
         case RKNN_TENSOR_INT16: {
-            int16_t* dst = static_cast<int16_t*>(mem->virt_addr);
+            int16_t* dst = static_cast<int16_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -776,7 +856,7 @@ void LowLevelNPU::set_input_from_float(int index,
             break;
         }
         case RKNN_TENSOR_UINT16: {
-            uint16_t* dst = static_cast<uint16_t*>(mem->virt_addr);
+            uint16_t* dst = static_cast<uint16_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -787,7 +867,7 @@ void LowLevelNPU::set_input_from_float(int index,
             break;
         }
         case RKNN_TENSOR_INT32: {
-            int32_t* dst = static_cast<int32_t*>(mem->virt_addr);
+            int32_t* dst = static_cast<int32_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -798,7 +878,7 @@ void LowLevelNPU::set_input_from_float(int index,
             break;
         }
         case RKNN_TENSOR_UINT32: {
-            uint32_t* dst = static_cast<uint32_t*>(mem->virt_addr);
+            uint32_t* dst = static_cast<uint32_t*>(write_ptr);
             for (size_t i = 0; i < copy_elems; ++i) {
                 const double raw = affine_qnt
                                        ? static_cast<double>(data[i]) / static_cast<double>(scale) +
@@ -811,6 +891,15 @@ void LowLevelNPU::set_input_from_float(int index,
         default:
             throw std::runtime_error("LowLevelNPU: set_input_from_float does not support target type " +
                                      std::string(get_type_string(attr.type)) + ".");
+    }
+
+    if (use_strided_copy) {
+        copy_data_with_stride(mem->virt_addr,
+                              dst_stride_bytes,
+                              packed.data(),
+                              src_stride_bytes,
+                              row_count,
+                              src_stride_bytes);
     }
 
     if (mem->fd >= 0) {

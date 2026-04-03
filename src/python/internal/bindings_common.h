@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "visiong/audio/KwsFrontend.h"
 #include "visiong/core/Camera.h"
 #include "core/internal/rga_utils.h"
 #include "visiong/modules/DisplayFB.h"
@@ -35,6 +36,7 @@
 
 #if VISIONG_WITH_NPU
 #include "visiong/npu/NPU.h"
+#include "visiong/npu/KWS.h"
 #include "visiong/npu/LowLevelNPU.h"
 #include "visiong/npu/PPOCR.h"
 #include <visiong/npu/NanoTrack.h>
@@ -61,6 +63,7 @@ DisplayHTTPFLV::Codec parse_httpflv_codec(const std::string& codec_str);
 DisplayHTTPFLV::RcMode parse_httpflv_rc_mode(const std::string& rc_mode_str);
 
 void bind_core_types(py::module_& m);
+void bind_audio(py::module_& m);
 void bind_image_buffer(py::module_& m);
 void bind_camera(py::module_& m);
 #if VISIONG_WITH_IVE

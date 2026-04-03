@@ -415,6 +415,111 @@ void bind_npu(py::module_& m) {
         .def_property_readonly("score", &NanoTrack::score,
              "Latest confidence score.");
 
+    py::class_<KWSResult>(m, "KWSResult", "Single keyword spotting classification result.")
+        .def_readonly("class_id", &KWSResult::class_id, "Predicted class index.")
+        .def_readonly("label", &KWSResult::label, "Predicted class label.")
+        .def_readonly("score", &KWSResult::score, "Top-1 probability after softmax.")
+        .def_readonly("scores", &KWSResult::scores, "Full per-class softmax probabilities.")
+        .def("__repr__", [](const KWSResult& result) {
+            return "<KWSResult label='" + result.label + "', score=" + std::to_string(result.score) + ">";
+        });
+
+    py::class_<KWS>(m, "KWS")
+        .def(py::init<const std::string&, const std::string&, int, int, int, int, int, int, float, float, float, bool, uint32_t>(),
+             "model_path"_a,
+             "labels_path"_a = "",
+             "sample_rate"_a = 16000,
+             "clip_samples"_a = 16000,
+             "window_size_ms"_a = 30,
+             "window_stride_ms"_a = 20,
+             "fft_size"_a = 512,
+             "num_mel_bins"_a = 40,
+             "lower_edge_hertz"_a = 20.0f,
+             "upper_edge_hertz"_a = 4000.0f,
+             "epsilon"_a = 1e-6f,
+             "normalize"_a = true,
+             "init_flags"_a = 0,
+             "Initializes a dedicated keyword spotting pipeline with native audio frontend and LowLevelNPU backend.")
+        .def("infer_pcm16",
+             [](KWS& self,
+                py::array_t<int16_t, py::array::c_style | py::array::forcecast> audio) {
+                 const py::buffer_info info = audio.request();
+                 KWSResult result;
+                 {
+                     py::gil_scoped_release release;
+                     result = self.infer_pcm16(static_cast<const int16_t*>(info.ptr),
+                                               static_cast<size_t>(info.size));
+                 }
+                 return result;
+             },
+             "audio"_a,
+             "Runs keyword spotting on a contiguous int16 PCM numpy array.")
+        .def("infer_float",
+             [](KWS& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> audio) {
+                 const py::buffer_info info = audio.request();
+                 KWSResult result;
+                 {
+                     py::gil_scoped_release release;
+                     result = self.infer_float(static_cast<const float*>(info.ptr),
+                                               static_cast<size_t>(info.size));
+                 }
+                 return result;
+             },
+             "audio"_a,
+             "Runs keyword spotting on a contiguous float32 numpy array.")
+        .def("infer",
+             [](KWS& self, py::array audio) {
+                 py::array c_array = py::array::ensure(audio, py::array::c_style);
+                 if (!c_array) {
+                     throw std::invalid_argument("KWS.infer expects a contiguous numpy array.");
+                 }
+                 const py::buffer_info info = c_array.request();
+                 if (info.format == py::format_descriptor<int16_t>::format() &&
+                     info.itemsize == static_cast<ssize_t>(sizeof(int16_t))) {
+                     KWSResult result;
+                     {
+                         py::gil_scoped_release release;
+                         result = self.infer_pcm16(static_cast<const int16_t*>(info.ptr),
+                                                   static_cast<size_t>(info.size));
+                     }
+                     return result;
+                 }
+                 if (info.format == py::format_descriptor<float>::format() &&
+                     info.itemsize == static_cast<ssize_t>(sizeof(float))) {
+                     KWSResult result;
+                     {
+                         py::gil_scoped_release release;
+                         result = self.infer_float(static_cast<const float*>(info.ptr),
+                                                   static_cast<size_t>(info.size));
+                     }
+                     return result;
+                 }
+                 throw std::invalid_argument("KWS.infer expects a contiguous int16 or float32 numpy array.");
+             },
+             "audio"_a,
+             "Dispatches to infer_pcm16() or infer_float() based on numpy dtype.")
+        .def("infer_wav", &KWS::infer_wav,
+             "wav_path"_a,
+             py::call_guard<py::gil_scoped_release>(),
+             "Loads a PCM16 WAV file, converts it to mono if needed, and runs keyword spotting.")
+        .def("is_initialized", &KWS::is_initialized,
+             "Checks whether the keyword spotting pipeline is initialized.")
+        .def_property_readonly("sample_rate", &KWS::sample_rate,
+             "Frontend sample rate in Hz.")
+        .def_property_readonly("clip_samples", &KWS::clip_samples,
+             "Expected clip length in samples.")
+        .def_property_readonly("num_frames", &KWS::num_frames,
+             "Frontend frame count.")
+        .def_property_readonly("num_mel_bins", &KWS::num_mel_bins,
+             "Frontend mel bin count.")
+        .def_property_readonly("num_classes", &KWS::num_classes,
+             "Model output class count.")
+        .def_property_readonly("labels", &KWS::labels,
+             "Loaded class labels.")
+        .def_property_readonly("last_run_us", &KWS::last_run_us,
+             "Last measured RKNN run time in microseconds.");
+
     // Register nk_command_buffer as an opaque pybind handle.
     // 将 nk_command_buffer 注册为 pybind 使用的不透明句柄。
 }

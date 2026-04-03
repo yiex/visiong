@@ -61,6 +61,18 @@ jobs:
         run: |
           python3 ./scripts/check_nanotrack_init_guard.py
 
+      - name: Validate LowLevelNPU stride guard
+        run: |
+          python3 ./scripts/check_lowlevelnpu_stride_guard.py
+
+      - name: Validate KWS audio frontend guard
+        run: |
+          python3 ./scripts/check_kws_audio_frontend_guard.py
+
+      - name: Validate KWS wrapper guard
+        run: |
+          python3 ./scripts/check_kws_wrapper_guard.py
+
       - name: Install host packages
         run: |
           sudo apt-get update

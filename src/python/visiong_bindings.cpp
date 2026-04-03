@@ -64,6 +64,7 @@ PYBIND11_MODULE(_visiong, m) {
     m.doc() = module_doc.c_str();
 
     bind_core_types(m);
+    bind_audio(m);
     bind_image_buffer(m);
     bind_camera(m);
 #if VISIONG_WITH_IVE
@@ -82,6 +83,6 @@ PYBIND11_MODULE(_visiong, m) {
 #ifdef VERSION_INFO
     m.attr("__version__") = VERSION_INFO;
 #else
-    m.attr("__version__") = "1.0.2";
+    m.attr("__version__") = "1.0.3";
 #endif
 }
