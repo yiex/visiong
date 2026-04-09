@@ -60,7 +60,7 @@ So for normal Python use, this is now the recommended API.
 
 Repository worktree:
 
-- `D:\visiong-e-pointer-kws`
+- local `visiong` checkout on `D:`
 
 Large data and artifacts:
 
@@ -135,7 +135,7 @@ Why `storage.googleapis.com` instead of `download.tensorflow.org`:
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong-e-pointer-kws/scripts/lowlevelnpu_kws
+cd /mnt/d/visiong/scripts/lowlevelnpu_kws
 python3 prepare_speech_commands.py \
   --raw-root /mnt/d/visiong-kws-demo/data/speech_commands_v0.02 \
   --output-root /mnt/d/visiong-kws-demo/prepared_kws \
@@ -190,7 +190,7 @@ The `64`-channel model won clearly, so it became the final one.
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong-e-pointer-kws/scripts/lowlevelnpu_kws
+cd /mnt/d/visiong/scripts/lowlevelnpu_kws
 python3 train_kws_ds_cnn.py \
   --prepared-root /mnt/d/visiong-kws-demo/prepared_kws \
   --output-root /mnt/d/visiong-kws-demo/train_kws_c64 \
@@ -218,7 +218,7 @@ Artifacts:
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong-e-pointer-kws/scripts/lowlevelnpu_kws
+cd /mnt/d/visiong/scripts/lowlevelnpu_kws
 python3 convert_kws_ds_cnn_to_rknn.py \
   --onnx-model /mnt/d/visiong-kws-demo/train_kws_c64/kws_ds_cnn.onnx \
   --dataset /mnt/d/visiong-kws-demo/prepared_kws/calibration/quant_dataset.txt \
@@ -308,7 +308,7 @@ That means the board result is consistent with the host reference for the exact 
 
 ## Cloud-Built Library Artifact Validation
 
-I also validated the fix using the cloud-built `visiong_python.zip` artifact generated from the `e-pointer` fork GitHub Actions workflow.
+I also validated the fix using the cloud-built `visiong_python.zip` artifact generated from the repository GitHub Actions workflow.
 
 This second validation is important because it proves the fix is really in the library binary, not only hidden behind a demo-side workaround.
 

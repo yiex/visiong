@@ -2,6 +2,49 @@
 #include "internal/bindings_common.h"
 #include <cstring>
 
+namespace {
+
+ASRResult infer_asr_from_numpy(ASR& self,
+                               py::array_t<float, py::array::c_style | py::array::forcecast> features) {
+    const py::buffer_info info = features.request();
+    if (info.ndim < 1 || info.ndim > 3) {
+        throw std::invalid_argument("ASR.infer expects a float32 numpy array with 1, 2, or 3 dimensions.");
+    }
+
+    const size_t feature_bins = static_cast<size_t>(self.feature_bins());
+    size_t frame_count = 0;
+    const float* data = static_cast<const float*>(info.ptr);
+
+    if (info.ndim == 1) {
+        if (feature_bins == 0 || (static_cast<size_t>(info.size) % feature_bins) != 0U) {
+            throw std::invalid_argument("ASR.infer expects a flat array whose length is divisible by feature_bins.");
+        }
+        frame_count = static_cast<size_t>(info.size) / feature_bins;
+    } else if (info.ndim == 2) {
+        if (info.shape[1] != static_cast<ssize_t>(feature_bins)) {
+            throw std::invalid_argument("ASR.infer expects shape [frames, feature_bins].");
+        }
+        frame_count = static_cast<size_t>(info.shape[0]);
+    } else {
+        if (info.shape[0] != 1) {
+            throw std::invalid_argument("ASR.infer expects shape [1, frames, feature_bins] for 3D inputs.");
+        }
+        if (info.shape[2] != static_cast<ssize_t>(feature_bins)) {
+            throw std::invalid_argument("ASR.infer expects the last dimension to match feature_bins.");
+        }
+        frame_count = static_cast<size_t>(info.shape[1]);
+    }
+
+    ASRResult result;
+    {
+        py::gil_scoped_release release;
+        result = self.infer_features(data, frame_count, feature_bins);
+    }
+    return result;
+}
+
+}  // namespace
+
 void bind_io_devices(py::module_& m) {
     py::class_<DisplayUDP>(m, "DisplayUDP")
         .def(py::init<const std::string&, int, int>(), "udp_ip"_a = "172.32.0.100", "udp_port"_a = 8000, "jpeg_quality"_a = 75,
@@ -519,6 +562,88 @@ void bind_npu(py::module_& m) {
              "Loaded class labels.")
         .def_property_readonly("last_run_us", &KWS::last_run_us,
              "Last measured RKNN run time in microseconds.");
+
+    py::class_<ASRResult>(m, "ASRResult", "Single ASR inference result from the two-stage acoustic+P2C pipeline.")
+        .def_readonly("text", &ASRResult::text, "Predicted Hanzi text.")
+        .def_readonly("pinyin", &ASRResult::pinyin, "Predicted whitespace-joined pinyin token sequence.")
+        .def_readonly("pinyin_tokens", &ASRResult::pinyin_tokens, "Predicted pinyin tokens after greedy segment collapse.")
+        .def_readonly("acoustic_frames", &ASRResult::acoustic_frames, "Effective acoustic frame count consumed by the wrapper.")
+        .def_readonly("used_tokens", &ASRResult::used_tokens, "Number of P2C token slots used after segment collapse.")
+        .def_readonly("acoustic_run_us", &ASRResult::acoustic_run_us, "LowLevelNPU acoustic stage run time in microseconds.")
+        .def_readonly("p2c_run_us", &ASRResult::p2c_run_us, "LowLevelNPU pinyin-to-char stage run time in microseconds.")
+        .def_readonly("rerank_run_us", &ASRResult::rerank_run_us, "Optional char-LM rerank time in microseconds.")
+        .def_readonly("total_run_us", &ASRResult::total_run_us, "Total wrapper run time in microseconds.")
+        .def("__repr__", [](const ASRResult& result) {
+            return "<ASRResult text='" + result.text + "', pinyin='" + result.pinyin + "'>";
+        });
+
+    py::class_<ASR>(m, "ASR")
+        .def(py::init<const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, int, int, int, int, float, const std::string&, float, int, int, uint32_t, uint32_t>(),
+             "acoustic_model_path"_a,
+             "acoustic_vocab_path"_a,
+             "p2c_model_path"_a,
+             "p2c_input_vocab_path"_a,
+             "p2c_output_vocab_path"_a,
+             "feature_frames"_a = 600,
+             "feature_bins"_a = 80,
+             "max_tokens"_a = 40,
+             "segment_topk"_a = 6,
+             "candidate_temperature"_a = 1.0f,
+             "char_lm_path"_a = "",
+             "char_lm_scale"_a = 0.0f,
+             "char_beam_size"_a = 6,
+             "char_topk"_a = 3,
+             "acoustic_init_flags"_a = 0,
+             "p2c_init_flags"_a = 0,
+             "Initializes a dedicated two-stage ASR wrapper with one acoustic LowLevelNPU and one pinyin-to-char LowLevelNPU. Optionally enables a lightweight char-LM rerank stage.")
+        .def("infer_features",
+             [](ASR& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> features) {
+                 return infer_asr_from_numpy(self, std::move(features));
+             },
+             "features"_a,
+             "Runs ASR on a float32 feature matrix shaped [frames, bins], [1, frames, bins], or a flat array divisible by feature_bins.")
+        .def("infer",
+             [](ASR& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> features) {
+                 return infer_asr_from_numpy(self, std::move(features));
+             },
+             "features"_a,
+             "Alias of infer_features().")
+        .def("is_initialized", &ASR::is_initialized,
+             "Checks whether both internal LowLevelNPU stages are initialized.")
+        .def_property_readonly("feature_frames", &ASR::feature_frames,
+             "Configured maximum acoustic frame count.")
+        .def_property_readonly("feature_bins", &ASR::feature_bins,
+             "Configured feature bin count.")
+        .def_property_readonly("max_tokens", &ASR::max_tokens,
+             "Configured maximum token count for the P2C stage.")
+        .def_property_readonly("segment_topk", &ASR::segment_topk,
+             "Configured per-segment candidate count used when building soft P2C inputs.")
+        .def_property_readonly("candidate_temperature", &ASR::candidate_temperature,
+             "Temperature used when converting segment logits into a soft token distribution.")
+        .def_property_readonly("has_char_lm", &ASR::has_char_lm,
+             "Returns True when an optional char-LM rerank resource is loaded.")
+        .def_property_readonly("char_lm_scale", &ASR::char_lm_scale,
+             "Scale applied to the optional char-LM score during final reranking.")
+        .def_property_readonly("char_beam_size", &ASR::char_beam_size,
+             "Beam size used by the optional char-LM rerank stage.")
+        .def_property_readonly("char_topk", &ASR::char_topk,
+             "Per-position top-k candidate count used by the optional char-LM rerank stage.")
+        .def_property_readonly("acoustic_vocab", &ASR::acoustic_vocab,
+             "Loaded acoustic CTC vocabulary.")
+        .def_property_readonly("p2c_input_vocab", &ASR::p2c_input_vocab,
+             "Loaded pinyin-to-char input vocabulary.")
+        .def_property_readonly("p2c_output_vocab", &ASR::p2c_output_vocab,
+             "Loaded pinyin-to-char output vocabulary.")
+        .def_property_readonly("last_acoustic_run_us", &ASR::last_acoustic_run_us,
+             "Last measured acoustic LowLevelNPU run time in microseconds.")
+        .def_property_readonly("last_p2c_run_us", &ASR::last_p2c_run_us,
+             "Last measured pinyin-to-char LowLevelNPU run time in microseconds.")
+        .def_property_readonly("last_rerank_run_us", &ASR::last_rerank_run_us,
+             "Last measured optional char-LM rerank time in microseconds.")
+        .def_property_readonly("last_total_run_us", &ASR::last_total_run_us,
+             "Last measured total wrapper run time in microseconds.");
 
     // Register nk_command_buffer as an opaque pybind handle.
     // 将 nk_command_buffer 注册为 pybind 使用的不透明句柄。

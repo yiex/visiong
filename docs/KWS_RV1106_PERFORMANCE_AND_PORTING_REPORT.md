@@ -22,7 +22,7 @@ What is now true:
 
 Repository worktree:
 
-- `D:\visiong-e-pointer-kws`
+- local `visiong` checkout on `D:`
 
 Artifacts and datasets:
 
@@ -30,7 +30,7 @@ Artifacts and datasets:
 
 Fork branch used for cloud builds:
 
-- `e-pointer/visiong`
+- `yiex/visiong`
 - branch `codex/kws-rv1106`
 
 Cloud-built artifact that validated the native frontend fix:
@@ -350,7 +350,7 @@ The final kept solution was validated in these ways:
 
 1. training and ONNX metrics were recorded locally
 2. RKNN conversion completed successfully for `rv1106`
-3. fixed cloud-built library artifact was downloaded from the `e-pointer` fork
+3. fixed cloud-built library artifact was downloaded from GitHub Actions
 4. the artifact was deployed to a dedicated board override directory
 5. Python frontend and native frontend were both run against the same board evaluation bundle
 6. native frontend features were compared directly against the Python reference frontend on the board

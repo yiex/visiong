@@ -73,6 +73,10 @@ jobs:
         run: |
           python3 ./scripts/check_kws_wrapper_guard.py
 
+      - name: Validate ASR wrapper guard
+        run: |
+          python3 ./scripts/check_asr_wrapper_guard.py
+
       - name: Install host packages
         run: |
           sudo apt-get update

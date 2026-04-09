@@ -35,6 +35,7 @@
 #endif
 
 #if VISIONG_WITH_NPU
+#include "visiong/npu/ASR.h"
 #include "visiong/npu/NPU.h"
 #include "visiong/npu/KWS.h"
 #include "visiong/npu/LowLevelNPU.h"

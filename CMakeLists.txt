@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.0.3" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.0.4" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -406,6 +406,7 @@ set(VISIONG_C_COMPAT_SRCS
 )
 
 set(VISIONG_NPU_SRCS
+    src/npu/ASR.cpp
     src/npu/KWS.cpp
     src/npu/LowLevelNPU.cpp
     src/npu/NPU.cpp

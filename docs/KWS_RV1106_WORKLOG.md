@@ -8,23 +8,15 @@ Port a mature keyword spotting pipeline to `visiong`, validate it on the real `R
 
 Repository worktree:
 
-- `D:\visiong-e-pointer-kws`
+- local `visiong` checkout on `D:`
 
 Large data and artifacts:
 
 - `D:\visiong-kws-demo`
 
-Fork used for cloud builds:
-
-- `https://github.com/e-pointer/visiong`
-
-Upstream:
+Repository:
 
 - `https://github.com/yiex/visiong`
-
-Branch:
-
-- `codex/kws-rv1106`
 
 ## Model Direction
 
