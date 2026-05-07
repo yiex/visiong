@@ -52,5 +52,7 @@ private:
     bool m_is_owner;
 };
 
+int convert_mpi_to_rga_format(int mpi_format);
+
 #endif  // VISIONG_CORE_RGAHELPER_H
 

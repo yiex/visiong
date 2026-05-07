@@ -355,7 +355,6 @@ set(VISIONG_CORE_SRCS
     src/common/LegacyKey.cpp
     src/core/ImageBufferMethods.cpp
     src/common/internal/dma_alloc.cpp
-    src/common/internal/nuklear_impl.cpp
     src/common/internal/stb_impl.cpp
     src/core/internal/log_filter.cpp
     src/core/internal/logger.cpp

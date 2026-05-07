@@ -64,8 +64,6 @@ size_t tensor_type_size_bytes_impl(rknn_tensor_type type) {
             return sizeof(int64_t);
         case RKNN_TENSOR_BOOL:
             return sizeof(uint8_t);
-        case RKNN_TENSOR_INT4:
-            return 1;
         default:
             return 0;
     }
@@ -285,7 +283,6 @@ int query_input_attr_with_fallback(rknn_context ctx, uint32_t index, rknn_tensor
         RKNN_QUERY_INPUT_ATTR,
         RKNN_QUERY_NATIVE_INPUT_ATTR,
         RKNN_QUERY_NATIVE_NHWC_INPUT_ATTR,
-        RKNN_QUERY_CURRENT_NATIVE_INPUT_ATTR,
     };
 
     int ret = RKNN_ERR_FAIL;
@@ -309,7 +306,6 @@ int query_output_attr_with_fallback(rknn_context ctx, uint32_t index, rknn_tenso
         RKNN_QUERY_OUTPUT_ATTR,
         RKNN_QUERY_NATIVE_OUTPUT_ATTR,
         RKNN_QUERY_NATIVE_NHWC_OUTPUT_ATTR,
-        RKNN_QUERY_CURRENT_NATIVE_OUTPUT_ATTR,
     };
 
     int ret = RKNN_ERR_FAIL;
@@ -473,6 +469,13 @@ LowLevelNPU::~LowLevelNPU() {
 
 size_t tensor_type_size_bytes(rknn_tensor_type type) {
     return tensor_type_size_bytes_impl(type);
+}
+
+int sync_rknn_cpu_mem_if_supported(rknn_context ctx, rknn_tensor_mem* mem, bool to_device) {
+    (void)ctx;
+    (void)mem;
+    (void)to_device;
+    return RKNN_SUCC;
 }
 
 LowLevelTensorInfo to_tensor_info(const rknn_tensor_attr& attr) {
@@ -659,9 +662,9 @@ void LowLevelNPU::sync_input_to_device_locked(int index) {
         return;
     }
 
-    const int ret = rknn_mem_sync(m_impl->ctx, mem, RKNN_MEMORY_SYNC_TO_DEVICE);
+    const int ret = sync_rknn_cpu_mem_if_supported(m_impl->ctx, mem, true);
     if (ret != RKNN_SUCC) {
-        throw std::runtime_error("LowLevelNPU: rknn_mem_sync TO_DEVICE failed, ret=" + std::to_string(ret));
+        throw std::runtime_error("LowLevelNPU: CPU input memory sync failed, ret=" + std::to_string(ret));
     }
 }
 
@@ -678,9 +681,9 @@ void LowLevelNPU::sync_output_from_device_locked(int index) const {
         return;
     }
 
-    const int ret = rknn_mem_sync(m_impl->ctx, mem, RKNN_MEMORY_SYNC_FROM_DEVICE);
+    const int ret = sync_rknn_cpu_mem_if_supported(m_impl->ctx, mem, false);
     if (ret != RKNN_SUCC) {
-        throw std::runtime_error("LowLevelNPU: rknn_mem_sync FROM_DEVICE failed, ret=" + std::to_string(ret));
+        throw std::runtime_error("LowLevelNPU: CPU output memory sync failed, ret=" + std::to_string(ret));
     }
 }
 

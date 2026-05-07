@@ -526,10 +526,8 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
                                   static_cast<int>(target_format))) {
                 throw std::runtime_error("NPU failed to allocate conversion DMA cache.");
             }
-            const int src_rga_fmt = (current_dma_buf->get_mpi_format() == static_cast<int>(RK_FMT_YUV420SP_VU))
-                                        ? RK_FORMAT_YCrCb_420_SP
-                                        : RK_FORMAT_YCbCr_420_SP;
-            const int dst_rga_fmt = (target_format == RK_FMT_RGB888) ? RK_FORMAT_RGB_888 : RK_FORMAT_BGR_888;
+            const int src_rga_fmt = convert_mpi_to_rga_format(current_dma_buf->get_mpi_format());
+            const int dst_rga_fmt = convert_mpi_to_rga_format(static_cast<int>(target_format));
             visiong::bufstate::prepare_device_read(*current_dma_buf, visiong::bufstate::BufferOwner::RGA);
             visiong::bufstate::prepare_device_write(*m_cached_infer_cvt_dma,
                                                     visiong::bufstate::BufferOwner::RGA,

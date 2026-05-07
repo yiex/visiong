@@ -1237,9 +1237,8 @@ ImageBuffer Camera::snapshot() {
                                  processing_buf->get_size(), w, h, static_cast<int>(processing_buf->format),
                                  processing_buf->w_stride, processing_buf->h_stride);
             RgaDmaBuffer dst_dma(fd, dst_vir, mb_size, w, h, static_cast<int>(m_impl->output_format), w_stride, h);
-            int src_rga = (processing_buf->format == RK_FMT_YUV420SP_VU) ? RK_FORMAT_YCrCb_420_SP
-                                                                         : RK_FORMAT_YCbCr_420_SP;
-            int dst_rga = (m_impl->output_format == RK_FMT_RGB888) ? RK_FORMAT_RGB_888 : RK_FORMAT_BGR_888;
+            int src_rga = convert_mpi_to_rga_format(static_cast<int>(processing_buf->format));
+            int dst_rga = convert_mpi_to_rga_format(static_cast<int>(m_impl->output_format));
             visiong::bufstate::prepare_device_read(src_dma, visiong::bufstate::BufferOwner::RGA);
             visiong::bufstate::prepare_device_write(dst_dma,
                                                    visiong::bufstate::BufferOwner::RGA,
