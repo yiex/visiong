@@ -17,6 +17,7 @@
 #include "visiong/modules/DisplayHTTP.h"
 #include "visiong/modules/DisplayHTTPFLV.h"
 #include "visiong/modules/DisplayRTSP.h"
+#include "visiong/modules/DisplaySPI.h"
 #include "visiong/modules/DisplayUDP.h"
 #include "visiong/modules/Touch.h"
 #include "visiong/modules/VencRecorder.h"

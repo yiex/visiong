@@ -32,12 +32,14 @@ def main(argv: Sequence[str]) -> int:
     require_any(cpp_entries, ["VISIONG_COMPONENTS.txt"], "cpp manifest")
     require_any(cpp_entries, ["cmake/VisionGConfig.cmake"], "cpp CMake config")
     require_any(cpp_entries, ["lib/libvisiong.so", "lib/libvisiong.a"], "cpp library")
+    require_any(cpp_entries, ["drivers/visiong_hw/visiong_hw.ko"], "cpp hardware helper module")
     if not any(entry.startswith("include/visiong/") for entry in cpp_entries):
         raise RuntimeError("missing public C++ headers under include/visiong/")
 
     require_any(py_entries, ["VISIONG_COMPONENTS.txt"], "python manifest")
     require_any(py_entries, ["_visiong.so"], "python extension module")
     require_any(py_entries, ["visiong.py"], "python shim")
+    require_any(py_entries, ["visiong_hw.ko"], "python hardware helper module")
 
     print(f"release archives look good: {cpp_zip.name}, {py_zip.name}")
     return 0

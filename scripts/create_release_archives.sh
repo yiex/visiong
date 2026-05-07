@@ -82,10 +82,24 @@ if [[ ! -f "${BUILD_DIR}/_visiong.so" || ! -f "${BUILD_DIR}/visiong.py" ]]; then
     exit 1
 fi
 
+VISIONG_HW_KO=""
+for candidate in \
+    "${BUILD_DIR}/visiong_hw.ko" \
+    "${ROOT_DIR}/drivers/visiong_hw/visiong_hw.ko"; do
+    if [[ -f "${candidate}" ]]; then
+        VISIONG_HW_KO="${candidate}"
+        break
+    fi
+done
+if [[ -z "${VISIONG_HW_KO}" ]]; then
+    echo "Error: visiong_hw.ko is missing. Build it with scripts/build_visiong_hw_module.sh first." >&2
+    exit 1
+fi
+
 TMP_DIR=$(mktemp -d)
 CPP_STAGE="${TMP_DIR}/cpp"
 PY_STAGE="${TMP_DIR}/python"
-mkdir -p "${CPP_STAGE}/include" "${CPP_STAGE}/lib" "${CPP_STAGE}/cmake" "${PY_STAGE}"
+mkdir -p "${CPP_STAGE}/include" "${CPP_STAGE}/lib" "${CPP_STAGE}/cmake" "${CPP_STAGE}/drivers/visiong_hw" "${PY_STAGE}"
 
 VISIONG_ENABLE_IVE=$(cache_get VISIONG_ENABLE_IVE || echo ON)
 VISIONG_ENABLE_NPU=$(cache_get VISIONG_ENABLE_NPU || echo ON)
@@ -130,6 +144,8 @@ write_component_manifest "${CPP_STAGE}" "${VISIONG_ENABLE_IVE}" "${VISIONG_ENABL
 
 cp -f "${BUILD_DIR}/_visiong.so" "${PY_STAGE}/_visiong.so"
 cp -f "${BUILD_DIR}/visiong.py" "${PY_STAGE}/visiong.py"
+cp -f "${VISIONG_HW_KO}" "${PY_STAGE}/visiong_hw.ko"
+cp -f "${VISIONG_HW_KO}" "${CPP_STAGE}/drivers/visiong_hw/visiong_hw.ko"
 write_component_manifest "${PY_STAGE}" "${VISIONG_ENABLE_IVE}" "${VISIONG_ENABLE_NPU}" "${VISIONG_ENABLE_GUI}"
 
 rm -f "${OUT_DIR}/${CPP_ZIP_NAME}" "${OUT_DIR}/${PY_ZIP_NAME}"

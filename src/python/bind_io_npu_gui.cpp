@@ -4,6 +4,7 @@
 
 namespace {
 
+#if VISIONG_WITH_NPU
 ASRResult infer_asr_from_numpy(ASR& self,
                                py::array_t<float, py::array::c_style | py::array::forcecast> features) {
     const py::buffer_info info = features.request();
@@ -42,6 +43,7 @@ ASRResult infer_asr_from_numpy(ASR& self,
     }
     return result;
 }
+#endif
 
 }  // namespace
 
@@ -109,6 +111,88 @@ void bind_io_devices(py::module_& m) {
              "original_width"_a, "original_height"_a, "rotation_degrees"_a,
              py::call_guard<py::gil_scoped_release>(),
              "Re-configures the screen geometry and coordinate rotation at runtime.");
+
+    py::class_<DisplaySPI, std::unique_ptr<DisplaySPI>>(m, "DisplaySPI", "SPI display output for ST7789-compatible panels.")
+        .def(py::init([](const std::string& chip_model,
+                         const std::string& spi_bus,
+                         int width,
+                         int height,
+                         int rotation_degrees,
+                         const std::string& dc_pin,
+                         const std::string& reset_pin,
+                         const std::string& backlight_pin,
+                         uint32_t speed_hz,
+                         int x_offset,
+                         int y_offset,
+                         bool bgr,
+                         bool invert,
+                         int spi_mode,
+                         int bits_per_word,
+                         size_t transfer_chunk_size,
+                         bool multi_buffering,
+                         size_t buffer_count,
+                         const std::string& backend,
+                         uint32_t source_clock_hz) {
+            DisplaySPIConfig config;
+            config.width = width;
+            config.height = height;
+            config.rotation_degrees = rotation_degrees;
+            config.backend = backend;
+            config.dc_pin = dc_pin;
+            config.reset_pin = reset_pin;
+            config.backlight_pin = backlight_pin;
+            config.speed_hz = speed_hz;
+            config.source_clock_hz = source_clock_hz;
+            config.x_offset = x_offset;
+            config.y_offset = y_offset;
+            config.bgr = bgr;
+            config.invert = invert;
+            config.spi_mode = static_cast<uint8_t>(spi_mode);
+            config.bits_per_word = static_cast<uint8_t>(bits_per_word);
+            config.transfer_chunk_size = transfer_chunk_size;
+            config.multi_buffering = multi_buffering;
+            config.buffer_count = buffer_count;
+            return std::make_unique<DisplaySPI>(chip_model, spi_bus, config);
+        }),
+        "chip_model"_a = "ST7789",
+        "spi_bus"_a = "/dev/spidev0.0",
+        "width"_a = 240,
+        "height"_a = 320,
+        "rotation_degrees"_a = 90,
+        "dc_pin"_a = "GPIO1_C5",
+        "reset_pin"_a = "GPIO1_C4",
+        "backlight_pin"_a = "",
+        "speed_hz"_a = 50000000,
+        "x_offset"_a = 0,
+        "y_offset"_a = 0,
+        "bgr"_a = false,
+        "invert"_a = false,
+        "spi_mode"_a = 0,
+        "bits_per_word"_a = 8,
+        "transfer_chunk_size"_a = 4096,
+        "multi_buffering"_a = true,
+        "buffer_count"_a = 3,
+        "backend"_a = "auto",
+        "source_clock_hz"_a = 200000000)
+        .def("display", static_cast<bool (DisplaySPI::*)(const ImageBuffer&)>(&DisplaySPI::display),
+             "img_buf"_a, py::call_guard<py::gil_scoped_release>(),
+             "Displays the full image over SPI.")
+        .def("display", static_cast<bool (DisplaySPI::*)(const ImageBuffer&, const std::tuple<int, int, int, int>&)>(&DisplaySPI::display),
+             "img_buf"_a, "roi"_a, py::call_guard<py::gil_scoped_release>(),
+             "Displays a source ROI over SPI.")
+        .def("clear", &DisplaySPI::clear, "color_rgb565"_a = 0, py::call_guard<py::gil_scoped_release>(),
+             "Fills the panel with one RGB565 color.")
+        .def("configure_geometry", &DisplaySPI::configure_geometry,
+             "width"_a, "height"_a, "rotation_degrees"_a,
+             "Updates panel geometry and rotation.")
+        .def("release", &DisplaySPI::release, py::call_guard<py::gil_scoped_release>(), "Releases SPI display resources.")
+        .def("is_initialized", &DisplaySPI::is_initialized, "Returns True if the SPI display is initialized.")
+        .def_property_readonly("screen_width", &DisplaySPI::get_screen_width)
+        .def_property_readonly("screen_height", &DisplaySPI::get_screen_height)
+        .def("__repr__", [](const DisplaySPI& self) {
+            return py::str("DisplaySPI(screen_width={}, screen_height={})")
+                .format(self.get_screen_width(), self.get_screen_height());
+        });
     
     py::class_<DisplayFB>(m, "DisplayFB", "Framebuffer display. mode: 'high' (default) or 'low' refresh.")
         .def(py::init([](py::args args, py::kwargs kwargs) {

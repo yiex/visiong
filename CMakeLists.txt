@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.0.4" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.1.0" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -355,6 +355,7 @@ set(VISIONG_CORE_SRCS
     src/common/LegacyKey.cpp
     src/core/ImageBufferMethods.cpp
     src/common/internal/dma_alloc.cpp
+    src/common/internal/nuklear_impl.cpp
     src/common/internal/stb_impl.cpp
     src/core/internal/log_filter.cpp
     src/core/internal/logger.cpp
@@ -370,6 +371,7 @@ set(VISIONG_MODULE_BASE_SRCS
     src/modules/DisplayHTTP.cpp
     src/modules/DisplayHTTPFLV.cpp
     src/modules/DisplayRTSP.cpp
+    src/modules/DisplaySPI.cpp
     src/modules/DisplayUDP.cpp
     src/modules/internal/font_support.cpp
     src/modules/internal/gui_render_utils.cpp

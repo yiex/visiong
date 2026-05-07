@@ -71,7 +71,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            bc \
+            bison \
             cmake \
+            flex \
+            gcc \
+            libssl-dev \
+            make \
             ninja-build \
             unzip \
             zip
@@ -107,6 +113,13 @@ jobs:
             --cmake-arg -DVISIONG_ENABLE_IVE="${VISIONG_ENABLE_IVE}" \
             --cmake-arg -DVISIONG_ENABLE_NPU="${VISIONG_ENABLE_NPU}" \
             --cmake-arg -DVISIONG_ENABLE_GUI="${VISIONG_ENABLE_GUI}"
+
+      - name: Build hardware helper module
+        run: |
+          VISIONG_SDK_ROOT="${GITHUB_WORKSPACE}/_deps/luckfox-pico" \
+          VISIONG_DEPS_ROOT="${GITHUB_WORKSPACE}/_stage" \
+          ./scripts/build_visiong_hw_module.sh
+          cp -f drivers/visiong_hw/visiong_hw.ko build/visiong_hw.ko
 
       - name: Prepare binary artifacts
         run: |

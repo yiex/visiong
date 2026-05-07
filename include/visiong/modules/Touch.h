@@ -41,6 +41,28 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+class GT911_Touch : public TouchDevice {
+public:
+    GT911_Touch(const std::string& i2c_bus_path,
+                uint8_t device_address,
+                int max_x,
+                int max_y,
+                bool swap_xy);
+    ~GT911_Touch() override;
+
+    GT911_Touch(const GT911_Touch&) = delete;
+    GT911_Touch& operator=(const GT911_Touch&) = delete;
+
+    void release() override;
+    bool is_pressed() override;
+    std::vector<TouchPoint> get_touch_points() override;
+    void configure_geometry(int original_width, int original_height, int rotation_degrees) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 std::unique_ptr<TouchDevice> create_touch_device(const std::string& chip_model,
                                                  const std::string& i2c_bus_path);
 

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+obj-m += visiong_hw.o
+
+visiong_hw-y := visiong_hw_main.o
+
+ccflags-y += -I$(src)/../../include

@@ -6,6 +6,59 @@
 namespace vp = visiong::pinmux;
 
 void bind_pinmux(py::module_& m) {
+    const auto parse_pin_function_pairs = [](const py::object& value) {
+        std::vector<std::pair<std::string, std::string>> pairs;
+        if (value.is_none()) {
+            return pairs;
+        }
+        if (py::isinstance<py::dict>(value)) {
+            py::dict dict = value.cast<py::dict>();
+            for (const auto& item : dict) {
+                pairs.emplace_back(py::str(item.first).cast<std::string>(),
+                                   py::str(item.second).cast<std::string>());
+            }
+            return pairs;
+        }
+        if (py::isinstance<py::str>(value) || !py::isinstance<py::sequence>(value)) {
+            throw py::type_error("pin/function mapping must be a dict or a sequence of (pin, function) pairs.");
+        }
+        py::sequence seq = value.cast<py::sequence>();
+        for (const auto& item : seq) {
+            py::sequence pair = py::reinterpret_borrow<py::object>(item).cast<py::sequence>();
+            if (pair.size() != 2) {
+                throw py::value_error("pin/function pair must contain exactly two items.");
+            }
+            pairs.emplace_back(py::str(pair[0]).cast<std::string>(), py::str(pair[1]).cast<std::string>());
+        }
+        return pairs;
+    };
+
+    const auto parse_pin_names = [](const py::object& value) {
+        std::vector<std::string> pins;
+        if (value.is_none()) {
+            return pins;
+        }
+        if (py::isinstance<py::dict>(value)) {
+            py::dict dict = value.cast<py::dict>();
+            for (const auto& item : dict) {
+                pins.push_back(py::str(item.first).cast<std::string>());
+            }
+            return pins;
+        }
+        if (py::isinstance<py::str>(value)) {
+            pins.push_back(py::str(value).cast<std::string>());
+            return pins;
+        }
+        if (!py::isinstance<py::sequence>(value)) {
+            throw py::type_error("pins must be a pin string, dict, or sequence of pin strings.");
+        }
+        py::sequence seq = value.cast<py::sequence>();
+        for (const auto& item : seq) {
+            pins.push_back(py::str(item).cast<std::string>());
+        }
+        return pins;
+    };
+
     py::class_<vp::PinId>(m, "PinId", "Resolved pin identifier (bank + pin index).")
         .def_readonly("bank", &vp::PinId::bank)
         .def_readonly("pin", &vp::PinId::pin)
@@ -31,13 +84,159 @@ void bind_pinmux(py::module_& m) {
                    ", gpio_only=" + (info.gpio_only ? "True" : "False") + ")";
         });
 
-    py::class_<vp::PinAltFunction>(m, "PinAltFunction", "Alternative function description for one pin.")
+    py::class_<vp::PinAltFunction>(m, "PinAltFunction", "Altenative function description for one pin.")
         .def_readonly("function", &vp::PinAltFunction::function)
         .def_readonly("group", &vp::PinAltFunction::group)
         .def_readonly("mux", &vp::PinAltFunction::mux)
         .def("__repr__", [](const vp::PinAltFunction& item) {
             return "PinAltFunction(function='" + item.function + "', group='" + item.group +
                    "', mux=" + std::to_string(item.mux) + ")";
+        });
+
+    py::class_<vp::PeripheralPinAssignment>(m, "PeripheralPin", "Resolved peripheral pin assignment.")
+        .def_readonly("pin", &vp::PeripheralPinAssignment::pin)
+        .def_readonly("function", &vp::PeripheralPinAssignment::function)
+        .def_readonly("group", &vp::PeripheralPinAssignment::group)
+        .def_readonly("role", &vp::PeripheralPinAssignment::role)
+        .def_readonly("mux", &vp::PeripheralPinAssignment::mux)
+        .def("__repr__", [](const vp::PeripheralPinAssignment& item) {
+            return "PeripheralPin(pin='" + item.pin + "', function='" + item.function +
+                   "', group='" + item.group + "', role='" + item.role +
+                   "', mux=" + std::to_string(item.mux) + ")";
+        });
+
+    py::class_<vp::SpiSetupStatus>(m, "SPISetup", "SPI pinmux and Linux interface setup result.")
+        .def_readonly("ok", &vp::SpiSetupStatus::ok)
+        .def_readonly("bus", &vp::SpiSetupStatus::bus)
+        .def_readonly("chip_select", &vp::SpiSetupStatus::chip_select)
+        .def_readonly("device", &vp::SpiSetupStatus::device)
+        .def_readonly("dev_path", &vp::SpiSetupStatus::dev_path)
+        .def_readonly("function", &vp::SpiSetupStatus::function)
+        .def_readonly("group", &vp::SpiSetupStatus::group)
+        .def_readonly("controller_bound", &vp::SpiSetupStatus::controller_bound)
+        .def_readonly("child_bound", &vp::SpiSetupStatus::child_bound)
+        .def_readonly("pins", &vp::SpiSetupStatus::pins)
+        .def_readonly("note", &vp::SpiSetupStatus::note)
+        .def("__bool__", [](const vp::SpiSetupStatus& status) { return status.ok; })
+        .def("__repr__", [](const vp::SpiSetupStatus& status) {
+            return "SPISetup(ok=" + std::string(status.ok ? "True" : "False") +
+                   ", device='" + status.device + "', group='" + status.group +
+                   "', dev_path='" + status.dev_path + "')";
+        });
+
+    py::class_<vp::UartSetupStatus>(m, "UARTSetup", "UART pinmux and Linux interface setup result.")
+        .def_readonly("ok", &vp::UartSetupStatus::ok)
+        .def_readonly("bus", &vp::UartSetupStatus::bus)
+        .def_readonly("device", &vp::UartSetupStatus::device)
+        .def_readonly("dev_path", &vp::UartSetupStatus::dev_path)
+        .def_readonly("function", &vp::UartSetupStatus::function)
+        .def_readonly("group", &vp::UartSetupStatus::group)
+        .def_readonly("driver_bound", &vp::UartSetupStatus::driver_bound)
+        .def_readonly("pins", &vp::UartSetupStatus::pins)
+        .def_readonly("note", &vp::UartSetupStatus::note)
+        .def("__bool__", [](const vp::UartSetupStatus& status) { return status.ok; })
+        .def("__repr__", [](const vp::UartSetupStatus& status) {
+            return "UARTSetup(ok=" + std::string(status.ok ? "True" : "False") +
+                   ", device='" + status.device + "', group='" + status.group +
+                   "', dev_path='" + status.dev_path + "')";
+        });
+
+    py::class_<vp::I2cSetupStatus>(m, "I2CSetup", "I2C pinmux and Linux interface setup result.")
+        .def_readonly("ok", &vp::I2cSetupStatus::ok)
+        .def_readonly("bus", &vp::I2cSetupStatus::bus)
+        .def_readonly("device", &vp::I2cSetupStatus::device)
+        .def_readonly("dev_path", &vp::I2cSetupStatus::dev_path)
+        .def_readonly("function", &vp::I2cSetupStatus::function)
+        .def_readonly("group", &vp::I2cSetupStatus::group)
+        .def_readonly("driver_bound", &vp::I2cSetupStatus::driver_bound)
+        .def_readonly("pins", &vp::I2cSetupStatus::pins)
+        .def_readonly("note", &vp::I2cSetupStatus::note)
+        .def("__bool__", [](const vp::I2cSetupStatus& status) { return status.ok; })
+        .def("__repr__", [](const vp::I2cSetupStatus& status) {
+            return "I2CSetup(ok=" + std::string(status.ok ? "True" : "False") +
+                   ", device='" + status.device + "', group='" + status.group +
+                   "', dev_path='" + status.dev_path + "')";
+        });
+
+    py::class_<vp::PwmSetupStatus>(m, "PWMSetup", "PWM pinmux and Linux interface setup result.")
+        .def_readonly("ok", &vp::PwmSetupStatus::ok)
+        .def_readonly("channel", &vp::PwmSetupStatus::channel)
+        .def_readonly("device", &vp::PwmSetupStatus::device)
+        .def_readonly("dev_path", &vp::PwmSetupStatus::dev_path)
+        .def_readonly("function", &vp::PwmSetupStatus::function)
+        .def_readonly("group", &vp::PwmSetupStatus::group)
+        .def_readonly("driver_bound", &vp::PwmSetupStatus::driver_bound)
+        .def_readonly("pins", &vp::PwmSetupStatus::pins)
+        .def_readonly("note", &vp::PwmSetupStatus::note)
+        .def("__bool__", [](const vp::PwmSetupStatus& status) { return status.ok; })
+        .def("__repr__", [](const vp::PwmSetupStatus& status) {
+            return "PWMSetup(ok=" + std::string(status.ok ? "True" : "False") +
+                   ", device='" + status.device + "', group='" + status.group +
+                   "', dev_path='" + status.dev_path + "')";
+        });
+
+    py::class_<vp::PeripheralRegisterInfo>(m, "PeripheralRegisterInfo",
+                                           "Resolved peripheral register block metadata.")
+        .def_readonly("available", &vp::PeripheralRegisterInfo::available)
+        .def_readonly("request", &vp::PeripheralRegisterInfo::request)
+        .def_readonly("alias", &vp::PeripheralRegisterInfo::alias)
+        .def_readonly("device", &vp::PeripheralRegisterInfo::device)
+        .def_readonly("compatible", &vp::PeripheralRegisterInfo::compatible)
+        .def_readonly("bound_driver", &vp::PeripheralRegisterInfo::bound_driver)
+        .def_readonly("base_addr", &vp::PeripheralRegisterInfo::base_addr)
+        .def_readonly("size", &vp::PeripheralRegisterInfo::size)
+        .def_readonly("note", &vp::PeripheralRegisterInfo::note)
+        .def("__bool__", [](const vp::PeripheralRegisterInfo& info) { return info.available; })
+        .def("__repr__", [](const vp::PeripheralRegisterInfo& info) {
+            return py::str("PeripheralRegisterInfo(alias='{}', base=0x{:x}, size=0x{:x}, device='{}')")
+                .format(info.alias, info.base_addr, info.size, info.device)
+                .cast<std::string>();
+        });
+
+    py::class_<vp::RegisterBlock>(m, "Reg", "Direct /dev/mem register block for RV1103/RV1106 peripherals.")
+        .def(py::init<const std::string&, size_t>(), "peripheral"_a, "map_size"_a = 0)
+        .def("is_open", &vp::RegisterBlock::is_open)
+        .def("close", &vp::RegisterBlock::close)
+        .def_property_readonly("info", &vp::RegisterBlock::info, py::return_value_policy::reference_internal)
+        .def("read8", &vp::RegisterBlock::read8, "offset"_a)
+        .def("write8", &vp::RegisterBlock::write8, "offset"_a, "value"_a)
+        .def("write8_repeat",
+             [](vp::RegisterBlock& self, uint32_t offset, py::buffer data) {
+                 py::buffer_info info = data.request();
+                 if (info.ndim != 1 || info.itemsize != 1 || info.strides[0] != 1) {
+                     throw py::value_error("write8_repeat expects a contiguous 1-byte buffer.");
+                 }
+                 const size_t size = static_cast<size_t>(info.size);
+                 self.write8_repeat(offset, info.ptr, size);
+                 return size;
+             },
+             "offset"_a, "data"_a,
+             "Writes each byte from data to the same 8-bit register offset.")
+        .def("read8_repeat",
+             [](const vp::RegisterBlock& self, uint32_t offset, size_t size) {
+                 const auto data = self.read8_repeat(offset, size);
+                 return py::bytes(reinterpret_cast<const char*>(data.data()), data.size());
+             },
+             "offset"_a, "size"_a,
+             "Reads one 8-bit register offset repeatedly and returns bytes.")
+        .def("read16", &vp::RegisterBlock::read16, "offset"_a)
+        .def("write16", &vp::RegisterBlock::write16, "offset"_a, "value"_a)
+        .def("read32", &vp::RegisterBlock::read32, "offset"_a)
+        .def("write32", &vp::RegisterBlock::write32, "offset"_a, "value"_a)
+        .def("update32", &vp::RegisterBlock::update32, "offset"_a, "mask"_a, "value"_a)
+        .def("set_bits", &vp::RegisterBlock::set_bits, "offset"_a, "mask"_a)
+        .def("clear_bits", &vp::RegisterBlock::clear_bits, "offset"_a, "mask"_a)
+        .def("__enter__", [](vp::RegisterBlock& self) -> vp::RegisterBlock& { return self; },
+             py::return_value_policy::reference_internal)
+        .def("__exit__", [](vp::RegisterBlock& self, const py::object&, const py::object&, const py::object&) {
+            self.close();
+            return false;
+        })
+        .def("__repr__", [](const vp::RegisterBlock& self) {
+            const auto& info = self.info();
+            return py::str("Reg('{}', base=0x{:x}, size=0x{:x})")
+                .format(info.alias, info.base_addr, info.size)
+                .cast<std::string>();
         });
 
     py::class_<vp::PinRuntimeStatus>(m, "PinRuntimeStatus", "Runtime pin ownership status from debugfs pinctrl.")
@@ -55,7 +254,7 @@ void bind_pinmux(py::module_& m) {
         .def_readonly("runtime", &vp::PinConflictReport::runtime);
 
     py::class_<vp::FunctionInterfaceStatus>(m, "FunctionInterfaceStatus",
-                                            "Kernel interface exposure status for one pin function.")
+                                            "Kenel interface exposure status for one pin function.")
         .def_readonly("request", &vp::FunctionInterfaceStatus::request)
         .def_readonly("function", &vp::FunctionInterfaceStatus::function)
         .def_readonly("group", &vp::FunctionInterfaceStatus::group)
@@ -81,6 +280,7 @@ void bind_pinmux(py::module_& m) {
         .def_readwrite("direction", &vp::GpioLineConfig::direction)
         .def_readwrite("bias", &vp::GpioLineConfig::bias)
         .def_readwrite("drive", &vp::GpioLineConfig::drive)
+        .def_readwrite("edge", &vp::GpioLineConfig::edge)
         .def_readwrite("drive_strength_level", &vp::GpioLineConfig::drive_strength_level)
         .def_readwrite("drive_strength_ma", &vp::GpioLineConfig::drive_strength_ma)
         .def_readwrite("active_low", &vp::GpioLineConfig::active_low)
@@ -95,6 +295,26 @@ void bind_pinmux(py::module_& m) {
         .def_readonly("gpiochip", &vp::GpioLineStatus::gpiochip)
         .def_readonly("config", &vp::GpioLineStatus::config)
         .def_readonly("note", &vp::GpioLineStatus::note);
+
+    py::class_<vp::GpioLineEvent>(m, "GpioLineEvent", "GPIO edge event returned by gpio_wait_event()/Pin.wait_irq().")
+        .def_readonly("valid", &vp::GpioLineEvent::valid)
+        .def_readonly("timed_out", &vp::GpioLineEvent::timed_out)
+        .def_readonly("cancelled", &vp::GpioLineEvent::cancelled)
+        .def_readonly("timestamp_ns", &vp::GpioLineEvent::timestamp_ns)
+        .def_readonly("edge", &vp::GpioLineEvent::edge)
+        .def_readonly("bank", &vp::GpioLineEvent::bank)
+        .def_readonly("pin", &vp::GpioLineEvent::pin)
+        .def_readonly("offset", &vp::GpioLineEvent::offset)
+        .def_readonly("sequence", &vp::GpioLineEvent::sequence)
+        .def_readonly("line_sequence", &vp::GpioLineEvent::line_sequence)
+        .def_readonly("note", &vp::GpioLineEvent::note)
+        .def("__bool__", [](const vp::GpioLineEvent& event) { return event.valid; })
+        .def("__repr__", [](const vp::GpioLineEvent& event) {
+            return py::str("GpioLineEvent(valid={}, edge='{}', timestamp_ns={}, pin='GPIO{}_{}')")
+                .format(event.valid, event.edge, event.timestamp_ns, event.bank,
+                        std::string(1, static_cast<char>('A' + event.pin / 8)) + std::to_string(event.pin % 8))
+                .cast<std::string>();
+        });
 
     py::class_<vp::DriveStrengthStatus>(m, "DriveStrengthStatus", "RV1106 IOC drive strength register status.")
         .def_readonly("available", &vp::DriveStrengthStatus::available)
@@ -165,10 +385,10 @@ void bind_pinmux(py::module_& m) {
 
         .def("list_functions", py::overload_cast<int, int>(&vp::Controller::list_functions, py::const_),
              "bank"_a, "pin"_a,
-             "Lists available alternate functions by parsing /proc/device-tree/pinctrl.")
+             "Lists available altenate functions by parsing /proc/device-tree/pinctrl.")
         .def("list_functions", py::overload_cast<const std::string&>(&vp::Controller::list_functions, py::const_),
              "pin_name"_a,
-             "Lists available alternate functions by pin string.")
+             "Lists available altenate functions by pin string.")
 
         .def("get_runtime_status", py::overload_cast<int, int>(&vp::Controller::get_runtime_status, py::const_),
              "bank"_a, "pin"_a,
@@ -243,6 +463,20 @@ void bind_pinmux(py::module_& m) {
         .def("gpio_get_status", py::overload_cast<const std::string&>(&vp::Controller::gpio_get_status, py::const_),
              "pin_name"_a,
              "Returns runtime status of requested GPIO line by pin name.")
+        .def("gpio_wait_event", py::overload_cast<int, int, int>(&vp::Controller::gpio_wait_event, py::const_),
+             "bank"_a, "pin"_a, "timeout_ms"_a = -1, py::call_guard<py::gil_scoped_release>(),
+             "Waits for one requested GPIO edge event. Returns GpioLineEvent; valid=False means timeout.")
+        .def("gpio_wait_event", py::overload_cast<const std::string&, int>(&vp::Controller::gpio_wait_event, py::const_),
+             "pin_name"_a, "timeout_ms"_a = -1, py::call_guard<py::gil_scoped_release>(),
+             "Waits for one requested GPIO edge event by pin string.")
+        .def("gpio_wait_event_cancelable",
+             py::overload_cast<int, int, int, int>(&vp::Controller::gpio_wait_event_cancelable, py::const_),
+             "bank"_a, "pin"_a, "cancel_fd"_a, "timeout_ms"_a = -1, py::call_guard<py::gil_scoped_release>(),
+             "Waits for one GPIO edge event or a readable cancel fd. Returns cancelled=True when cancelled.")
+        .def("gpio_wait_event_cancelable",
+             py::overload_cast<const std::string&, int, int>(&vp::Controller::gpio_wait_event_cancelable, py::const_),
+             "pin_name"_a, "cancel_fd"_a, "timeout_ms"_a = -1, py::call_guard<py::gil_scoped_release>(),
+             "Waits for one GPIO edge event by pin string or a readable cancel fd.")
         .def("set_drive_strength", py::overload_cast<int, int, int>(&vp::Controller::set_drive_strength),
              "bank"_a, "pin"_a, "level"_a,
              "Sets RV1106 IOC drive strength level (0..7) for a pin.")
@@ -305,7 +539,169 @@ void bind_pinmux(py::module_& m) {
              "Sets mux by function name (e.g. 'uart4', 'pwm1') or group name (e.g. 'uart4m1-xfer').")
         .def("set_function", py::overload_cast<const std::string&, const std::string&>(&vp::Controller::set_function),
              "pin_name"_a, "function_or_group"_a,
-             "Sets mux by pin string + function/group name.");
+             "Sets mux by pin string + function/group name.")
+        .def("func", py::overload_cast<const std::string&, const std::string&>(&vp::Controller::set_function),
+             "pin_name"_a, "function_or_group"_a,
+             "Short alias for set_function(pin_name, function_or_group).")
+        .def("set_functions",
+             [parse_pin_function_pairs](vp::Controller& self, const py::object& pin_functions) {
+                 self.set_functions(parse_pin_function_pairs(pin_functions));
+             },
+             "pin_functions"_a,
+             "Sets multiple pin functions from a dict or sequence of (pin, function) pairs.")
+        .def("funcs",
+             [parse_pin_function_pairs](vp::Controller& self, const py::object& pin_functions) {
+                 self.set_functions(parse_pin_function_pairs(pin_functions));
+             },
+             "pin_functions"_a,
+             "Short alias for set_functions().")
+        .def("release_owner", &vp::Controller::release_owner,
+             "owner"_a,
+             "Unbinds a Linux owner device from platform/i2c/spi buses when possible.")
+        .def("get_bound_driver", &vp::Controller::get_bound_driver,
+             "bus"_a, "device"_a,
+             "Returns the currently bound Linux driver for a bus device, or ''.")
+        .def("driver", &vp::Controller::get_bound_driver,
+             "bus"_a, "device"_a,
+             "Short alias for get_bound_driver().")
+        .def("bind_driver", &vp::Controller::bind_driver,
+             "bus"_a, "device"_a, "driver"_a, "unbind_current"_a = true,
+             "Binds a Linux bus device to a driver. Supports aliases like platform/spi0 and spi/spi0.0.")
+        .def("bind", &vp::Controller::bind_driver,
+             "bus"_a, "device"_a, "driver"_a, "unbind_current"_a = true,
+             "Short alias for bind_driver().")
+        .def("unbind_driver", &vp::Controller::unbind_driver,
+             "bus"_a, "device"_a,
+             "Unbinds the currently bound driver for a Linux bus device.")
+        .def("unbind", &vp::Controller::unbind_driver,
+             "bus"_a, "device"_a,
+             "Short alias for unbind_driver().")
+        .def("spi_get_bound_driver", &vp::Controller::spi_get_bound_driver,
+             "spi_device"_a,
+             "Returns the current driver for an SPI device such as spi0.0.")
+        .def("spi_bind_driver", &vp::Controller::spi_bind_driver,
+             "spi_device"_a, "driver"_a, "unbind_current"_a = true,
+             "Binds an SPI child device to a driver.")
+        .def("spi_bind_spidev", &vp::Controller::spi_bind_spidev,
+             "spi_device"_a,
+             "Binds an SPI child device to spidev.")
+        .def("setup_spi",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& spi,
+                               const py::object& pins,
+                               int chip_select,
+                               bool bind_spidev) {
+                 if (py::isinstance<py::int_>(spi)) {
+                     return self.setup_spi(spi.cast<int>(), parse_pin_names(pins), chip_select, bind_spidev);
+                 }
+                 return self.setup_spi(py::str(spi).cast<std::string>(), parse_pin_names(pins), bind_spidev);
+             },
+             "spi"_a, "pins"_a, "chip_select"_a = 0, "bind_spidev"_a = false,
+             "Infers SPI pin roles from pin names, checks one common spiXmY group, sets mux, and optionally prepares spidev.")
+        .def("spi",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& spi,
+                               const py::object& pins,
+                               int chip_select,
+                               bool bind_spidev) {
+                 if (py::isinstance<py::int_>(spi)) {
+                     return self.setup_spi(spi.cast<int>(), parse_pin_names(pins), chip_select, bind_spidev);
+                 }
+                 return self.setup_spi(py::str(spi).cast<std::string>(), parse_pin_names(pins), bind_spidev);
+             },
+             "spi"_a, "pins"_a, "chip_select"_a = 0, "bind_spidev"_a = false,
+             "MicroPython-style SPI pinmux setup. Example: p.spi(0, ['GPIO1_C1','GPIO1_C2','GPIO1_C0']).")
+        .def("spi_prepare",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& spi,
+                               const py::object& pins,
+                               int chip_select,
+                               bool bind_spidev) {
+                 if (py::isinstance<py::int_>(spi)) {
+                     return self.setup_spi(spi.cast<int>(), parse_pin_names(pins), chip_select, bind_spidev).ok;
+                 }
+                 return self.setup_spi(py::str(spi).cast<std::string>(), parse_pin_names(pins), bind_spidev).ok;
+             },
+             "spi"_a, "pins"_a, "chip_select"_a = 0, "bind_spidev"_a = false,
+             "Compatibility alias returning bool. Prefer spi()/setup_spi() for detailed status.")
+        .def("setup_uart",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& uart,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(uart)) {
+                     return self.setup_uart(uart.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_uart(py::str(uart).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "uart"_a, "pins"_a, "bind_driver"_a = false,
+             "Infers UART pin roles from pin names, checks one common uartXmY group, and sets mux.")
+        .def("uart",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& uart,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(uart)) {
+                     return self.setup_uart(uart.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_uart(py::str(uart).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "uart"_a, "pins"_a, "bind_driver"_a = false,
+             "MicroPython-style UART pinmux setup. Example: p.uart(4, ['GPIO1_C4','GPIO1_C5']).")
+        .def("setup_i2c",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& i2c,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(i2c)) {
+                     return self.setup_i2c(i2c.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_i2c(py::str(i2c).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "i2c"_a, "pins"_a, "bind_driver"_a = false,
+             "Infers I2C scl/sda roles from pin names, checks one common i2cXmY group, and sets mux.")
+        .def("i2c",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& i2c,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(i2c)) {
+                     return self.setup_i2c(i2c.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_i2c(py::str(i2c).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "i2c"_a, "pins"_a, "bind_driver"_a = false,
+             "MicroPython-style I2C pinmux setup. Example: p.i2c(3, ['GPIO2_A6','GPIO2_A7']).")
+        .def("setup_pwm",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& pwm,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(pwm)) {
+                     return self.setup_pwm(pwm.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_pwm(py::str(pwm).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "pwm"_a, "pins"_a, "bind_driver"_a = false,
+             "Infers a PWM output pin, checks that it supports pwmN, and sets mux.")
+        .def("pwm",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& pwm,
+                               const py::object& pins,
+                               bool bind_driver) {
+                 if (py::isinstance<py::int_>(pwm)) {
+                     return self.setup_pwm(pwm.cast<int>(), parse_pin_names(pins), bind_driver);
+                 }
+                 return self.setup_pwm(py::str(pwm).cast<std::string>(), parse_pin_names(pins), bind_driver);
+             },
+             "pwm"_a, "pins"_a, "bind_driver"_a = false,
+             "MicroPython-style PWM pinmux setup. Example: p.pwm(2, 'GPIO0_A1').")
+        .def("reg_info", &vp::Controller::get_register_block_info,
+             "peripheral"_a,
+             "Resolves a peripheral short name such as spi0/uart4/i2c3/pwm0 to base address metadata.")
+        .def("reg", &vp::Controller::map_registers,
+             "peripheral"_a, "map_size"_a = 0,
+             "Maps a peripheral register block through /dev/mem and returns Reg.");
 
     py::class_<vp::NpuClockStatus>(m, "NpuClockStatus", "NPU clock probe status.")
         .def_readonly("npu_node_present", &vp::NpuClockStatus::npu_node_present)
@@ -360,4 +756,3 @@ void bind_pinmux(py::module_& m) {
              "Requests immediate system reboot (sync + reboot).")
         ;
 }
-

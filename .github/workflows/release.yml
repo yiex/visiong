@@ -81,7 +81,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            bc \
+            bison \
             cmake \
+            flex \
+            gcc \
+            libssl-dev \
+            make \
             ninja-build \
             unzip \
             zip
@@ -118,6 +124,13 @@ jobs:
             --cmake-arg -DVISIONG_ENABLE_NPU="${VISIONG_ENABLE_NPU}" \
             --cmake-arg -DVISIONG_ENABLE_GUI="${VISIONG_ENABLE_GUI}"
 
+      - name: Build hardware helper module
+        run: |
+          VISIONG_SDK_ROOT="${GITHUB_WORKSPACE}/_deps/luckfox-pico" \
+          VISIONG_DEPS_ROOT="${GITHUB_WORKSPACE}/_stage" \
+          ./scripts/build_visiong_hw_module.sh
+          cp -f drivers/visiong_hw/visiong_hw.ko build/visiong_hw.ko
+
       - name: Assemble binary release packages
         run: |
           mkdir -p dist
@@ -138,6 +151,7 @@ jobs:
 
           ## Build notes
           - Build toggles: IVE=${VISIONG_ENABLE_IVE}, NPU=${VISIONG_ENABLE_NPU}, GUI=${VISIONG_ENABLE_GUI}.
+          - Both release archives include \`visiong_hw.ko\` for the RV1103/RV1106 low-level hardware helper.
           - \`visiong_cpp.zip\` only ships VisionG public headers; external SDK headers are intentionally excluded.
           - Staged Rockchip SDK, RKNN, librga, and IVE runtime libraries are not published as release assets.
           - The target board must still provide the required Rockchip runtime libraries.
