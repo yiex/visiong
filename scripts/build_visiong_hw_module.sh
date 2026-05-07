@@ -43,6 +43,29 @@ find_cross_compile_prefix() {
     return 1
 }
 
+prepare_kernel_build_dir() {
+    if [[ -f "${KDIR}/include/generated/autoconf.h" && -f "${KDIR}/scripts/module.lds" ]]; then
+        return 0
+    fi
+
+    local defconfig=""
+    for candidate in rv1106_defconfig luckfox_rv1106_linux_defconfig rockchip_linux_defconfig rockchip_defconfig; do
+        if [[ -f "${KDIR}/arch/${ARCH}/configs/${candidate}" ]]; then
+            defconfig="${candidate}"
+            break
+        fi
+    done
+
+    if [[ -z "${defconfig}" ]]; then
+        echo "error: kernel tree is not prepared and no supported defconfig was found under ${KDIR}/arch/${ARCH}/configs" >&2
+        exit 1
+    fi
+
+    echo "Preparing kernel build tree with ${defconfig}..."
+    make -C "${KDIR}" ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE:-}" "${defconfig}"
+    make -C "${KDIR}" ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE:-}" modules_prepare
+}
+
 if [[ -z "${KDIR:-}" ]]; then
     KDIR=$(find_kernel_build_dir || true)
 fi
@@ -63,6 +86,8 @@ fi
 echo "KDIR=${KDIR}"
 echo "ARCH=${ARCH}"
 echo "CROSS_COMPILE=${CROSS_COMPILE:-<host>}"
+
+prepare_kernel_build_dir
 
 if [[ ! -f "${KDIR}/scripts/module.lds" ]]; then
     KERNEL_SRC="${KERNEL_SRC:-}"
