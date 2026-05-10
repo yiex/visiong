@@ -23,7 +23,8 @@ enum class ModelType {
     YOLO11,
     YOLO11_SEG,
     YOLO11_POSE,
-    LPRNET
+    LPRNET,
+    MLSD
 };
 
 struct Detection {
@@ -34,6 +35,15 @@ struct Detection {
     std::vector<std::tuple<float, float>> landmarks;  // RetinaFace only: 5 points (left_eye, right_eye, nose, left_mouth, right_mouth); empty for others
     std::vector<std::tuple<float, float, float>> keypoints; // YOLO11-pose only: (x, y, score)
     std::vector<std::tuple<float, float>> mask_points; // YOLO11-seg only: contour points
+};
+
+struct LineSegment {
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
+    float score = 0.0f;
+    float length = 0.0f;
 };
 
 class NPU {
@@ -58,6 +68,11 @@ public:
                                  const std::string& model_format = "rgb") {
         return inference(img_buf, roi, model_format);
     }
+
+    std::vector<LineSegment> infer_lines(const ImageBuffer& img_buf,
+                                         float score_threshold = 0.10f,
+                                         float distance_threshold = 20.0f,
+                                         const std::string& model_format = "rgb");
 
     std::vector<float> get_face_feature(const ImageBuffer& face_image);
 

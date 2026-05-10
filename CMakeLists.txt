@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.1.0" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.1.1" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -415,6 +415,7 @@ set(VISIONG_NPU_SRCS
     src/npu/PPOCR.cpp
     src/npu/facenet.cpp
     src/npu/lprnet.cpp
+    src/npu/mlsd.cpp
     src/npu/retinaface.cpp
     src/npu/yolo11.cpp
     src/npu/yolo11_pose.cpp
@@ -428,6 +429,7 @@ set(VISIONG_PYTHON_BINDING_SRCS
     src/python/bind_audio.cpp
     src/python/bind_camera_ive.cpp
     src/python/bind_core_image.cpp
+    src/python/bind_hw.cpp
     src/python/bind_io_npu_gui.cpp
     src/python/bind_pinmux.cpp
     src/python/bind_streaming.cpp

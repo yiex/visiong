@@ -68,6 +68,7 @@ void bind_core_types(py::module_& m);
 void bind_audio(py::module_& m);
 void bind_image_buffer(py::module_& m);
 void bind_camera(py::module_& m);
+void bind_hw(py::module_& m);
 #if VISIONG_WITH_IVE
 void bind_ive(py::module_& m);
 #endif
@@ -80,4 +81,3 @@ void bind_npu(py::module_& m);
 void bind_gui(py::module_& m);
 #endif
 void bind_streaming(py::module_& m);
-

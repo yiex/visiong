@@ -114,9 +114,12 @@ ModelType parse_model_type(const std::string& model_type_str) {
     if (model_type == "lprnet") {
         return ModelType::LPRNET;
     }
+    if (model_type == "mlsd" || model_type == "m-lsd") {
+        return ModelType::MLSD;
+    }
     throw std::invalid_argument(
         "Unsupported model_type: '" + model_type_str +
-        "'. Use 'yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', or 'lprnet'.");
+        "'. Use 'yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', or 'mlsd'.");
 }
 #endif
 

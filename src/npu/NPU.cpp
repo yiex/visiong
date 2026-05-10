@@ -13,6 +13,7 @@
 #include "internal/models/retinaface.h"
 #include "internal/models/facenet.h"
 #include "internal/models/lprnet.h"
+#include "internal/models/mlsd.h"
 #include "internal/rknn_model_utils.h"
 #include "visiong/common/pixel_format.h"
 #include "common/internal/string_utils.h"
@@ -23,6 +24,9 @@
 #include <cstring>
 #include <string>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 namespace {
 
@@ -157,6 +161,8 @@ int init_model_dispatch(ModelType model_type, const std::string& model_path, rkn
             return init_yolo11_pose_model(model_path.c_str(), app_ctx);
         case ModelType::LPRNET:
             return init_lprnet_model(model_path.c_str(), app_ctx);
+        case ModelType::MLSD:
+            return init_mlsd_model(model_path.c_str(), app_ctx);
         default:
             throw std::invalid_argument("Unknown model type.");
     }
@@ -257,6 +263,8 @@ int release_model_dispatch(ModelType model_type, rknn_app_context_t* app_ctx) {
             return release_yolo11_pose_model(app_ctx);
         case ModelType::LPRNET:
             return release_lprnet_model(app_ctx);
+        case ModelType::MLSD:
+            return release_mlsd_model(app_ctx);
         default:
             return -1;
     }
@@ -325,7 +333,7 @@ void run_detection_dispatch(ModelType model_type,
             }
             return;
         default:
-            throw std::runtime_error("NPU::inference supports only YOLOV5/YOLO11/YOLO11_SEG/YOLO11_POSE/RETINAFACE.");
+            throw std::runtime_error("NPU::inference supports only YOLOV5/YOLO11/YOLO11_SEG/YOLO11_POSE/RETINAFACE. Use infer_lines() for MLSD.");
     }
 }
 
@@ -341,6 +349,202 @@ std::pair<int, int> resolve_npu_input_strides(const rknn_app_context_t& app_ctx,
     return {w_stride, h_stride};
 }
 
+size_t required_npu_input_bytes(const rknn_app_context_t& app_ctx, int dst_w_stride, int dst_h_stride) {
+    return static_cast<size_t>(dst_h_stride) *
+           static_cast<size_t>(dst_w_stride) *
+           static_cast<size_t>(app_ctx.model_channel);
+}
+
+void validate_mlsd_input_meta(const rknn_app_context_t* app_ctx, int dst_w_stride, int dst_h_stride) {
+    if (app_ctx == nullptr || app_ctx->input_mems[0] == nullptr || app_ctx->input_attrs == nullptr) {
+        throw std::runtime_error("MLSD input tensor is not initialized.");
+    }
+    if (app_ctx->model_channel != 3 && app_ctx->model_channel != 4) {
+        throw std::runtime_error("MLSD model requires a 3-channel RGB/BGR or 4-channel RGB/BGR/A input tensor.");
+    }
+    const size_t required = required_npu_input_bytes(*app_ctx, dst_w_stride, dst_h_stride);
+    if (static_cast<size_t>(app_ctx->input_mems[0]->size) < required) {
+        throw std::runtime_error("MLSD input tensor buffer is smaller than expected.");
+    }
+}
+
+void mark_mlsd_cpu_input_ready(rknn_app_context_t* app_ctx) {
+    const auto npu_input_view = visiong::bufstate::make_dma_view(
+        app_ctx->input_mems[0]->fd,
+        app_ctx->input_mems[0]->virt_addr,
+        app_ctx->input_mems[0]->size);
+    visiong::bufstate::mark_cpu_write(npu_input_view);
+    visiong::bufstate::prepare_device_read(npu_input_view, visiong::bufstate::BufferOwner::NPU);
+}
+
+void pack_rgb_pixels_to_mlsd_input(const uint8_t* src_base,
+                                   int src_width,
+                                   int src_height,
+                                   int src_w_stride,
+                                   rknn_app_context_t* app_ctx) {
+    if (app_ctx == nullptr) {
+        throw std::runtime_error("MLSD input tensor is not initialized.");
+    }
+    if (src_base == nullptr) {
+        throw std::runtime_error("MLSD input source buffer is null.");
+    }
+    const auto [npu_w_stride, npu_h_stride] =
+        resolve_npu_input_strides(*app_ctx, app_ctx->model_width, app_ctx->model_height);
+    const int dst_channels = app_ctx->model_channel;
+    const int dst_w_stride = std::max(app_ctx->model_width, npu_w_stride);
+    const int dst_h_stride = std::max(app_ctx->model_height, npu_h_stride);
+    validate_mlsd_input_meta(app_ctx, dst_w_stride, dst_h_stride);
+
+    const int copy_rows = std::min(app_ctx->model_height, src_height);
+    const int copy_cols = std::min(app_ctx->model_width, src_width);
+    auto* dst_base = static_cast<uint8_t*>(app_ctx->input_mems[0]->virt_addr);
+    if (dst_base == nullptr) {
+        throw std::runtime_error("MLSD input buffer is null.");
+    }
+
+    const bool has_padding = (copy_rows < dst_h_stride) || (copy_cols < dst_w_stride);
+    if (has_padding) {
+        std::memset(dst_base, 0, required_npu_input_bytes(*app_ctx, dst_w_stride, dst_h_stride));
+    }
+
+    if (dst_channels == 3 && src_w_stride == copy_cols && dst_w_stride == copy_cols) {
+        std::memcpy(dst_base, src_base, static_cast<size_t>(copy_rows) * copy_cols * 3U);
+        mark_mlsd_cpu_input_ready(app_ctx);
+        return;
+    }
+
+    for (int y = 0; y < copy_rows; ++y) {
+        const uint8_t* src = src_base + static_cast<size_t>(y) * src_w_stride * 3U;
+        uint8_t* dst = dst_base + static_cast<size_t>(y) * dst_w_stride * static_cast<size_t>(dst_channels);
+        if (dst_channels == 3) {
+            std::memcpy(dst, src, static_cast<size_t>(copy_cols) * 3U);
+            continue;
+        }
+        int x = 0;
+        constexpr uint8_t kAlpha = 1;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        const uint8x16_t alpha = vdupq_n_u8(kAlpha);
+        for (; x + 15 < copy_cols; x += 16) {
+            const uint8x16x3_t rgb = vld3q_u8(src + static_cast<size_t>(x) * 3U);
+            uint8x16x4_t rgba;
+            rgba.val[0] = rgb.val[0];
+            rgba.val[1] = rgb.val[1];
+            rgba.val[2] = rgb.val[2];
+            rgba.val[3] = alpha;
+            vst4q_u8(dst + static_cast<size_t>(x) * 4U, rgba);
+        }
+#endif
+        for (; x < copy_cols; ++x) {
+            const uint8_t* s = src + static_cast<size_t>(x) * 3U;
+            uint8_t* d = dst + static_cast<size_t>(x) * 4U;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = kAlpha;
+        }
+    }
+
+    mark_mlsd_cpu_input_ready(app_ctx);
+}
+
+void pack_rgb_to_mlsd_rgba_input(const ImageBuffer& rgb_img, rknn_app_context_t* app_ctx) {
+    if (rgb_img.format != RK_FMT_RGB888 && rgb_img.format != RK_FMT_BGR888) {
+        throw std::invalid_argument("MLSD preprocessing requires RGB888/BGR888 input.");
+    }
+    visiong::bufstate::prepare_cpu_read(rgb_img);
+    pack_rgb_pixels_to_mlsd_input(static_cast<const uint8_t*>(rgb_img.get_data()),
+                                  rgb_img.width,
+                                  rgb_img.height,
+                                  rgb_img.w_stride,
+                                  app_ctx);
+}
+
+bool rga_resize_convert_to_dma(const ImageBuffer& src_image, RgaDmaBuffer& dst_dma) {
+    try {
+        SourceDmaContext src_dma_ctx = prepare_source_dma(src_image);
+        if (src_dma_ctx.current == nullptr) {
+            return false;
+        }
+        visiong::bufstate::prepare_device_read(*src_dma_ctx.current, visiong::bufstate::BufferOwner::RGA);
+        visiong::bufstate::prepare_device_write(dst_dma,
+                                                visiong::bufstate::BufferOwner::RGA,
+                                                visiong::bufstate::AccessIntent::Overwrite);
+        const im_rect src_rect = {0, 0, src_dma_ctx.current->get_width(), src_dma_ctx.current->get_height()};
+        const im_rect dst_rect = {0, 0, dst_dma.get_width(), dst_dma.get_height()};
+        if (improcess(src_dma_ctx.current->get_buffer(), dst_dma.get_buffer(), {}, src_rect, dst_rect, {}, IM_SYNC) !=
+            IM_STATUS_SUCCESS) {
+            return false;
+        }
+        visiong::bufstate::mark_device_write(dst_dma, visiong::bufstate::BufferOwner::RGA);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool try_prepare_mlsd_input_fast(const ImageBuffer& img_buf,
+                                 PIXEL_FORMAT_E target_format,
+                                 rknn_app_context_t* app_ctx,
+                                 std::unique_ptr<RgaDmaBuffer>* scratch_rgb_dma) {
+    if (app_ctx == nullptr || app_ctx->input_mems[0] == nullptr) {
+        return false;
+    }
+    if (target_format != RK_FMT_RGB888 && target_format != RK_FMT_BGR888) {
+        return false;
+    }
+
+    const auto [npu_w_stride, npu_h_stride] =
+        resolve_npu_input_strides(*app_ctx, app_ctx->model_width, app_ctx->model_height);
+    const int dst_w_stride = std::max(app_ctx->model_width, npu_w_stride);
+    const int dst_h_stride = std::max(app_ctx->model_height, npu_h_stride);
+    validate_mlsd_input_meta(app_ctx, dst_w_stride, dst_h_stride);
+
+    const bool exact_rgb_input = img_buf.format == target_format &&
+                                 img_buf.width == app_ctx->model_width &&
+                                 img_buf.height == app_ctx->model_height;
+    if (exact_rgb_input && (app_ctx->model_channel == 4 || !img_buf.is_zero_copy())) {
+        pack_rgb_to_mlsd_rgba_input(img_buf, app_ctx);
+        return true;
+    }
+
+    if (app_ctx->model_channel == 3) {
+        RgaDmaBuffer npu_input_wrapper(
+            app_ctx->input_mems[0]->fd,
+            app_ctx->input_mems[0]->virt_addr,
+            app_ctx->input_mems[0]->size,
+            app_ctx->model_width,
+            app_ctx->model_height,
+            static_cast<int>(target_format),
+            dst_w_stride,
+            dst_h_stride);
+        if (!rga_resize_convert_to_dma(img_buf, npu_input_wrapper)) {
+            return false;
+        }
+        visiong::bufstate::prepare_device_read(npu_input_wrapper, visiong::bufstate::BufferOwner::NPU);
+        return true;
+    }
+
+    if (app_ctx->model_channel == 4 && scratch_rgb_dma != nullptr) {
+        if (!ensure_dma_cache(scratch_rgb_dma,
+                              app_ctx->model_width,
+                              app_ctx->model_height,
+                              static_cast<int>(target_format))) {
+            return false;
+        }
+        if (!rga_resize_convert_to_dma(img_buf, **scratch_rgb_dma)) {
+            return false;
+        }
+        visiong::bufstate::prepare_cpu_read(**scratch_rgb_dma);
+        pack_rgb_pixels_to_mlsd_input(static_cast<const uint8_t*>((*scratch_rgb_dma)->get_vir_addr()),
+                                      (*scratch_rgb_dma)->get_width(),
+                                      (*scratch_rgb_dma)->get_height(),
+                                      (*scratch_rgb_dma)->get_wstride(),
+                                      app_ctx);
+        return true;
+    }
+
+    return false;
+}
 }  // namespace
 
 NPU::NPU(ModelType model_type, const std::string& model_path, const std::string& label_path, float box_thresh, float nms_thresh)
@@ -648,6 +852,57 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
         }
     }
     return detections;
+}
+
+std::vector<LineSegment> NPU::infer_lines(const ImageBuffer& img_buf,
+                                          float score_threshold,
+                                          float distance_threshold,
+                                          const std::string& model_format_str) {
+    std::lock_guard<std::mutex> lock(m_runtime_mutex);
+    if (!m_initialized || m_model_type != ModelType::MLSD) {
+        throw std::runtime_error("infer_lines can only be called on an initialized MLSD model.");
+    }
+    if (!img_buf.is_valid()) {
+        throw std::invalid_argument("Invalid input image.");
+    }
+    if (visiong::is_gray8_format(img_buf.format)) {
+        throw std::invalid_argument("MLSD does not support Grayscale input directly. Please provide color image or convert first.");
+    }
+
+    const PIXEL_FORMAT_E target_format = parse_model_input_format(model_format_str);
+    if (!try_prepare_mlsd_input_fast(img_buf, target_format, m_app_ctx.get(), &m_cached_infer_cvt_dma)) {
+        ImageBuffer converted_buffer;
+        ImageBuffer resized_buffer;
+        const ImageBuffer* processing_buf = &img_buf;
+        if (processing_buf->format != target_format) {
+            converted_buffer = processing_buf->to_format(target_format);
+            processing_buf = &converted_buffer;
+        }
+        if (processing_buf->width != m_app_ctx->model_width || processing_buf->height != m_app_ctx->model_height) {
+            resized_buffer = processing_buf->resize(m_app_ctx->model_width, m_app_ctx->model_height);
+            processing_buf = &resized_buffer;
+        }
+        pack_rgb_to_mlsd_rgba_input(*processing_buf, m_app_ctx.get());
+    }
+
+    std::vector<LineSegment> lines;
+    try {
+        if (inference_mlsd_model(m_app_ctx.get(),
+                                 img_buf.width,
+                                 img_buf.height,
+                                 score_threshold,
+                                 distance_threshold,
+                                 &lines) != 0) {
+            throw std::runtime_error("MLSD inference failed.");
+        }
+    } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        if (msg.find("inference failed") != std::string::npos && try_recover_runtime(msg.c_str())) {
+            return {};
+        }
+        throw;
+    }
+    return lines;
 }
 
 // --- FaceNet zero-copy optimized path --- / --- FaceNet 零拷贝优化路径 ---

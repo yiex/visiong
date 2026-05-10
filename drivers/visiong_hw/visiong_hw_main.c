@@ -15,6 +15,8 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/of_dma.h>
 #include <linux/poll.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
@@ -1397,12 +1399,26 @@ static const char *visiong_hw_spi_platform_name(u32 bus)
 	}
 }
 
+static const char *visiong_hw_spi_of_path(u32 bus)
+{
+	switch (bus) {
+	case 0:
+		return "/spi@ff500000";
+	case 1:
+		return "/spi@ff510000";
+	default:
+		return NULL;
+	}
+}
+
 static struct dma_chan *visiong_hw_spi_reg_dma_tx_chan(u32 bus)
 {
 	struct visiong_hw_spi_reg_dma_bus *dma;
 	struct dma_chan *chan;
 	struct device *dev;
+	struct device_node *np;
 	const char *name;
+	const char *of_path;
 
 	if (bus >= ARRAY_SIZE(visiong_hw_spi_reg_dma))
 		return ERR_PTR(-EINVAL);
@@ -1425,22 +1441,43 @@ static struct dma_chan *visiong_hw_spi_reg_dma_tx_chan(u32 bus)
 	}
 
 	dev = bus_find_device_by_name(&platform_bus_type, NULL, name);
-	if (!dev) {
+	if (dev) {
+		chan = dma_request_chan(dev, "tx");
+		if (!IS_ERR(chan)) {
+			dma->platform_dev = dev;
+			dma->tx_chan = chan;
+			pr_info("visiong_hw: spi%u register TX DMA channel acquired from platform device\n",
+				bus);
+			goto out;
+		}
+		pr_info("visiong_hw: spi%u platform TX DMA unavailable (%ld), trying device tree node\n",
+			bus, PTR_ERR(chan));
+		put_device(dev);
+	}
+
+	of_path = visiong_hw_spi_of_path(bus);
+	if (!of_path) {
+		chan = ERR_PTR(-EINVAL);
+		goto out_mark;
+	}
+
+	np = of_find_node_by_path(of_path);
+	if (!np) {
 		chan = ERR_PTR(-ENODEV);
 		goto out_mark;
 	}
 
-	chan = dma_request_chan(dev, "tx");
+	chan = of_dma_request_slave_channel(np, "tx");
+	of_node_put(np);
 	if (IS_ERR(chan)) {
-		pr_info("visiong_hw: spi%u register TX DMA unavailable (%ld), using PIO fallback\n",
+		pr_info("visiong_hw: spi%u device-tree TX DMA unavailable (%ld), using PIO fallback\n",
 			bus, PTR_ERR(chan));
-		put_device(dev);
 		goto out_mark;
 	}
 
-	dma->platform_dev = dev;
 	dma->tx_chan = chan;
-	pr_info("visiong_hw: spi%u register TX DMA channel acquired\n", bus);
+	pr_info("visiong_hw: spi%u register TX DMA channel acquired from device tree node\n",
+		bus);
 	goto out;
 
 out_mark:

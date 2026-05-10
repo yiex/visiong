@@ -235,6 +235,7 @@ void bind_npu(py::module_& m) {
         .value("YOLO11_SEG", ModelType::YOLO11_SEG)
         .value("YOLO11_POSE", ModelType::YOLO11_POSE)
         .value("LPRNET", ModelType::LPRNET)
+        .value("MLSD", ModelType::MLSD)
         .export_values();
 
     py::class_<Detection>(m, "Detection", "Single detection from YOLOv5/RetinaFace/YOLO11/YOLO11_SEG/YOLO11_POSE inference.")
@@ -249,6 +250,20 @@ void bind_npu(py::module_& m) {
             return "<Detection label='" + d.label + "', score=" + std::to_string(d.score) + ">";
         });
 
+    py::class_<LineSegment>(m, "LineSegment", "Single line segment from MLSD inference.")
+        .def_readonly("x1", &LineSegment::x1)
+        .def_readonly("y1", &LineSegment::y1)
+        .def_readonly("x2", &LineSegment::x2)
+        .def_readonly("y2", &LineSegment::y2)
+        .def_readonly("score", &LineSegment::score)
+        .def_readonly("length", &LineSegment::length)
+        .def_property_readonly("points", [](const LineSegment& l) {
+            return std::make_tuple(l.x1, l.y1, l.x2, l.y2);
+        })
+        .def("__repr__", [](const LineSegment& l) {
+            return "<LineSegment score=" + std::to_string(l.score) + ", length=" + std::to_string(l.length) + ">";
+        });
+
     py::class_<NPU>(m, "NPU")
         .def(py::init([](const std::string& model_type_str,
                          const std::string& model_path,
@@ -260,7 +275,7 @@ void bind_npu(py::module_& m) {
         }),
         "model_type"_a, "model_path"_a, "label_path"_a = "",
         "box"_a = 0.25f, "nms"_a = 0.45f,
-	"Initializes NPU with model_type ('yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet'), model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45).")
+	"Initializes NPU with model_type ('yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', 'mlsd'), model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45).")
 
         .def(py::init([](ModelType model_type,
                          const std::string& model_path,
@@ -280,6 +295,14 @@ void bind_npu(py::module_& m) {
              "Runs inference. For detection/pose models (YOLOv5, RetinaFace, YOLO11, YOLO11_SEG, YOLO11_POSE) returns a list of Detection. "
              "For FACENET use get_face_feature(); for LPRNET use recognize_plate(). model_format: 'rgb' or 'bgr'. "
              "Does not support grayscale input.")
+
+        .def("infer_lines", &NPU::infer_lines,
+             "img_buf"_a,
+             "score_threshold"_a = 0.10f,
+             "distance_threshold"_a = 20.0f,
+             "model_format"_a = "rgb",
+             py::call_guard<py::gil_scoped_release>(),
+             "Runs MLSD line segment inference and returns a list of LineSegment. model_format: 'rgb' or 'bgr'.")
 
         .def("get_face_feature", &NPU::get_face_feature, "face_image"_a,
              py::call_guard<py::gil_scoped_release>(),

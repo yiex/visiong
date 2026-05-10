@@ -3,7 +3,406 @@
 #include "visiong/core/pinmux.h"
 #include "visiong/core/npu_clock.h"
 
+#include <cctype>
+#include <iterator>
+#include <map>
+#include <regex>
+#include <set>
+#include <unordered_set>
+
 namespace vp = visiong::pinmux;
+
+namespace {
+
+std::string normalize_pinmux_token(std::string token) {
+    token.erase(std::remove_if(token.begin(), token.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), token.end());
+    std::transform(token.begin(), token.end(), token.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    std::replace(token.begin(), token.end(), '_', '-');
+    return token;
+}
+
+std::string normalize_spi_role(std::string role) {
+    role = normalize_pinmux_token(std::move(role));
+    if (role == "sck") {
+        return "clk";
+    }
+    if (role.rfind("cs", 0) == 0) {
+        return "cs";
+    }
+    return role;
+}
+
+bool role_matches(const std::string& actual, const std::string& wanted) {
+    const std::string normalized_wanted = normalize_spi_role(wanted);
+    return normalized_wanted.empty() || normalize_spi_role(actual) == normalized_wanted;
+}
+
+std::vector<std::string> normalize_role_hints(std::vector<std::string> hints, size_t count) {
+    if (hints.empty()) {
+        hints.resize(count);
+        return hints;
+    }
+    if (hints.size() != count) {
+        throw std::invalid_argument("role_hints length must match pins length.");
+    }
+    for (std::string& item : hints) {
+        item = normalize_pinmux_token(std::move(item));
+    }
+    return hints;
+}
+
+std::string join_sorted_csv(const std::set<std::string>& items) {
+    std::string out;
+    for (const std::string& item : items) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += item;
+    }
+    return out;
+}
+
+py::tuple infer_spi_from_pins_native(vp::Controller& self,
+                                     const std::vector<std::string>& pins,
+                                     int requested_bus,
+                                     int requested_cs,
+                                     std::vector<std::string> role_hints) {
+    if (pins.size() < 3) {
+        throw std::invalid_argument("SPI pins must include clk/sck, cs, and at least one of mosi/miso.");
+    }
+    role_hints = normalize_role_hints(std::move(role_hints), pins.size());
+
+    struct Candidate {
+        std::string group;
+        int bus = -1;
+        std::string role;
+        int chip_select = -1;
+    };
+
+    static const std::regex pattern(R"(^((spi([0-9]+)m[0-9]+))-(clk|sck|mosi|miso|cs([0-9]+))$)");
+    std::vector<std::vector<Candidate>> all_candidates;
+    all_candidates.reserve(pins.size());
+
+    for (const std::string& pin : pins) {
+        std::vector<Candidate> candidates;
+        for (const vp::PinAltFunction& entry : self.list_functions(pin)) {
+            const std::string function = normalize_pinmux_token(entry.function);
+            const std::string group = normalize_pinmux_token(entry.group);
+            std::smatch match;
+            if (!std::regex_match(group, match, pattern)) {
+                continue;
+            }
+            const int bus = std::stoi(match[3].str());
+            if (requested_bus >= 0 && bus != requested_bus) {
+                continue;
+            }
+            std::string role = match[4].str();
+            int chip_select = -1;
+            if (match[5].matched) {
+                chip_select = std::stoi(match[5].str());
+                if (requested_cs >= 0 && chip_select != requested_cs) {
+                    continue;
+                }
+            }
+            if (!function.empty() && function != "spi" + std::to_string(bus)) {
+                continue;
+            }
+            candidates.push_back({match[1].str(), bus, role, chip_select});
+        }
+        if (candidates.empty()) {
+            throw std::invalid_argument(pin + " has no SPI alternate function.");
+        }
+        all_candidates.push_back(std::move(candidates));
+    }
+
+    std::set<std::string> common_groups;
+    for (const Candidate& item : all_candidates.front()) {
+        common_groups.insert(item.group);
+    }
+    for (size_t i = 1; i < all_candidates.size(); ++i) {
+        std::set<std::string> pin_groups;
+        for (const Candidate& item : all_candidates[i]) {
+            pin_groups.insert(item.group);
+        }
+        std::set<std::string> intersection;
+        std::set_intersection(common_groups.begin(), common_groups.end(),
+                              pin_groups.begin(), pin_groups.end(),
+                              std::inserter(intersection, intersection.begin()));
+        common_groups = std::move(intersection);
+    }
+    if (common_groups.empty()) {
+        throw std::invalid_argument("SPI pins do not belong to one common spiXmY mux group.");
+    }
+    if (common_groups.size() > 1) {
+        std::vector<std::pair<int, std::string>> scored;
+        for (const std::string& group : common_groups) {
+            std::unordered_set<std::string> roles;
+            int score = 0;
+            for (size_t i = 0; i < all_candidates.size(); ++i) {
+                const auto it = std::find_if(all_candidates[i].begin(), all_candidates[i].end(),
+                                             [&](const Candidate& item) { return item.group == group; });
+                if (it == all_candidates[i].end()) {
+                    continue;
+                }
+                const std::string role = normalize_spi_role(it->role);
+                roles.insert(role);
+                if (!role_hints[i].empty() && role_matches(role, role_hints[i])) {
+                    score += 100;
+                }
+            }
+            score += roles.count("clk") ? 20 : 0;
+            score += roles.count("cs") ? 20 : 0;
+            score += roles.count("mosi") ? 10 : 0;
+            score += roles.count("miso") ? 10 : 0;
+            scored.emplace_back(score, group);
+        }
+        std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.first != rhs.first) {
+                return lhs.first > rhs.first;
+            }
+            return lhs.second < rhs.second;
+        });
+        if (scored.size() >= 2 && scored[0].first == scored[1].first) {
+            throw std::invalid_argument("SPI pins are ambiguous across groups: " + join_sorted_csv(common_groups));
+        }
+        common_groups = {scored.front().second};
+    }
+
+    const std::string selected_group = *common_groups.begin();
+    std::unordered_set<std::string> roles;
+    int bus = -1;
+    int chip_select = requested_cs;
+    for (const auto& candidates : all_candidates) {
+        const auto it = std::find_if(candidates.begin(), candidates.end(),
+                                     [&](const Candidate& item) { return item.group == selected_group; });
+        if (it == candidates.end()) {
+            throw std::logic_error("Internal SPI pin inference mismatch.");
+        }
+        bus = it->bus;
+        std::string role = normalize_spi_role(it->role);
+        if (role == "cs") {
+            chip_select = it->chip_select;
+        }
+        if (!roles.insert(role).second) {
+            throw std::invalid_argument("duplicate SPI role '" + role + "' in pin list.");
+        }
+    }
+    if (!roles.count("clk") || !roles.count("cs") || (!roles.count("mosi") && !roles.count("miso"))) {
+        throw std::invalid_argument("SPI pins must contain clk/sck, cs, and at least one of mosi/miso.");
+    }
+    return py::make_tuple(bus, chip_select < 0 ? 0 : chip_select);
+}
+
+py::tuple infer_bus_from_two_role_peripheral_native(vp::Controller& self,
+                                                    const std::vector<std::string>& pins,
+                                                    int requested_bus,
+                                                    std::vector<std::string> role_hints,
+                                                    const std::string& prefix,
+                                                    const std::regex& pattern,
+                                                    const std::vector<std::string>& primary_roles,
+                                                    const std::string& display_name) {
+    if (pins.empty()) {
+        throw std::invalid_argument(display_name + " pins must not be empty.");
+    }
+    role_hints = normalize_role_hints(std::move(role_hints), pins.size());
+
+    struct Candidate {
+        std::string group;
+        int bus = -1;
+        std::string role;
+    };
+
+    std::vector<std::vector<Candidate>> all_candidates;
+    all_candidates.reserve(pins.size());
+    for (const std::string& pin : pins) {
+        std::vector<Candidate> candidates;
+        for (const vp::PinAltFunction& entry : self.list_functions(pin)) {
+            const std::string function = normalize_pinmux_token(entry.function);
+            const std::string group = normalize_pinmux_token(entry.group);
+            std::smatch match;
+            if (!std::regex_match(group, match, pattern)) {
+                continue;
+            }
+            const int bus = std::stoi(match[3].str());
+            if (requested_bus >= 0 && bus != requested_bus) {
+                continue;
+            }
+            if (!function.empty() && function != prefix + std::to_string(bus)) {
+                continue;
+            }
+            candidates.push_back({match[1].str(), bus, match[4].str()});
+        }
+        if (candidates.empty()) {
+            throw std::invalid_argument(pin + " has no " + display_name + " alternate function.");
+        }
+        all_candidates.push_back(std::move(candidates));
+    }
+
+    std::set<std::string> common_groups;
+    for (const Candidate& item : all_candidates.front()) {
+        common_groups.insert(item.group);
+    }
+    for (size_t i = 1; i < all_candidates.size(); ++i) {
+        std::set<std::string> pin_groups;
+        for (const Candidate& item : all_candidates[i]) {
+            pin_groups.insert(item.group);
+        }
+        std::set<std::string> intersection;
+        std::set_intersection(common_groups.begin(), common_groups.end(),
+                              pin_groups.begin(), pin_groups.end(),
+                              std::inserter(intersection, intersection.begin()));
+        common_groups = std::move(intersection);
+    }
+    if (common_groups.empty()) {
+        throw std::invalid_argument(display_name + " pins do not belong to one common " + prefix + "XmY mux group.");
+    }
+    if (common_groups.size() > 1) {
+        std::vector<std::pair<int, std::string>> scored;
+        for (const std::string& group : common_groups) {
+            std::unordered_set<std::string> roles;
+            int score = 0;
+            for (size_t i = 0; i < all_candidates.size(); ++i) {
+                const auto it = std::find_if(all_candidates[i].begin(), all_candidates[i].end(),
+                                             [&](const Candidate& item) { return item.group == group; });
+                if (it == all_candidates[i].end()) {
+                    continue;
+                }
+                std::string role = it->role == "xfer" ? "" : it->role;
+                if (role.empty()) {
+                    role = it->role;
+                }
+                roles.insert(role);
+                if (!role_hints[i].empty() && role == role_hints[i]) {
+                    score += 100;
+                }
+            }
+            if (display_name == "UART") {
+                score += roles.count("tx") ? 30 : 0;
+                score += roles.count("rx") ? 30 : 0;
+                score += roles.count("xfer") ? 5 : 0;
+                score += roles.count("rts") ? 1 : 0;
+                score += roles.count("cts") ? 1 : 0;
+            } else {
+                score += roles.count("scl") ? 20 : 0;
+                score += roles.count("sda") ? 20 : 0;
+            }
+            scored.emplace_back(score, group);
+        }
+        std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.first != rhs.first) {
+                return lhs.first > rhs.first;
+            }
+            return lhs.second < rhs.second;
+        });
+        if (scored.size() >= 2 && scored[0].first == scored[1].first) {
+            throw std::invalid_argument(display_name + " pins are ambiguous across groups: " +
+                                        join_sorted_csv(common_groups));
+        }
+        common_groups = {scored.front().second};
+    }
+
+    const std::string selected_group = *common_groups.begin();
+    std::unordered_set<std::string> roles;
+    int bus = -1;
+    for (const auto& candidates : all_candidates) {
+        auto it = std::find_if(candidates.begin(), candidates.end(), [&](const Candidate& item) {
+            return item.group == selected_group && item.role != "xfer";
+        });
+        if (it == candidates.end()) {
+            it = std::find_if(candidates.begin(), candidates.end(), [&](const Candidate& item) {
+                return item.group == selected_group;
+            });
+        }
+        if (it == candidates.end()) {
+            throw std::logic_error("Internal " + display_name + " pin inference mismatch.");
+        }
+        bus = it->bus;
+        std::string role = it->role == "xfer" ? (display_name == "UART" ? "txrx" : "xfer") : it->role;
+        if (role == "xfer") {
+            continue;
+        }
+        if (!roles.insert(role).second) {
+            throw std::invalid_argument("duplicate " + display_name + " role '" + role + "' in pin list.");
+        }
+    }
+
+    if (display_name == "UART") {
+        if (!roles.count("tx") && !roles.count("rx") && !roles.count("txrx")) {
+            throw std::invalid_argument("UART pins must contain tx or rx from the same group.");
+        }
+    } else {
+        for (const std::string& role : primary_roles) {
+            if (!roles.count(role)) {
+                throw std::invalid_argument("I2C pins must contain scl and sda from the same group.");
+            }
+        }
+    }
+    return py::make_tuple(bus);
+}
+
+py::tuple infer_uart_from_pins_native(vp::Controller& self,
+                                      const std::vector<std::string>& pins,
+                                      int requested_bus,
+                                      std::vector<std::string> role_hints) {
+    static const std::regex pattern(R"(^((uart([0-9]+)m[0-9]+))-(tx|rx|rts|cts|xfer)$)");
+    return infer_bus_from_two_role_peripheral_native(self, pins, requested_bus, std::move(role_hints),
+                                                     "uart", pattern, {"tx", "rx"}, "UART");
+}
+
+py::tuple infer_i2c_from_pins_native(vp::Controller& self,
+                                     const std::vector<std::string>& pins,
+                                     int requested_bus,
+                                     std::vector<std::string> role_hints) {
+    if (pins.size() < 2) {
+        throw std::invalid_argument("I2C pins must include scl and sda.");
+    }
+    static const std::regex pattern(R"(^((i2c([0-9]+)m[0-9]+))-(scl|sda|xfer)$)");
+    return infer_bus_from_two_role_peripheral_native(self, pins, requested_bus, std::move(role_hints),
+                                                     "i2c", pattern, {"scl", "sda"}, "I2C");
+}
+
+py::tuple infer_pwm_from_pin_native(vp::Controller& self,
+                                    const std::string& pin,
+                                    int requested_channel) {
+    static const std::regex pattern(R"(^pwm([0-9]+)(?:ir)?m[0-9]+$)");
+    std::set<int> candidates;
+    for (const vp::PinAltFunction& entry : self.list_functions(pin)) {
+        const std::string function = normalize_pinmux_token(entry.function);
+        const std::string group = normalize_pinmux_token(entry.group);
+        std::smatch match;
+        if (!std::regex_match(group, match, pattern)) {
+            continue;
+        }
+        const int channel = std::stoi(match[1].str());
+        if (requested_channel >= 0 && channel != requested_channel) {
+            continue;
+        }
+        if (!function.empty() && function != "pwm" + std::to_string(channel)) {
+            continue;
+        }
+        candidates.insert(channel);
+    }
+    if (candidates.empty()) {
+        throw std::invalid_argument(pin + " has no PWM alternate function.");
+    }
+    if (candidates.size() > 1) {
+        std::string names;
+        for (int channel : candidates) {
+            if (!names.empty()) {
+                names += ", ";
+            }
+            names += "pwm" + std::to_string(channel);
+        }
+        throw std::invalid_argument("PWM pin is ambiguous across channels: " + names);
+    }
+    return py::make_tuple(*candidates.begin());
+}
+
+}  // namespace
 
 void bind_pinmux(py::module_& m) {
     const auto parse_pin_function_pairs = [](const py::object& value) {
@@ -585,6 +984,40 @@ void bind_pinmux(py::module_& m) {
         .def("spi_bind_spidev", &vp::Controller::spi_bind_spidev,
              "spi_device"_a,
              "Binds an SPI child device to spidev.")
+        .def("_infer_spi_from_pins_native",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& pins,
+                               int requested_bus,
+                               int requested_cs,
+                               const std::vector<std::string>& role_hints) {
+                 return infer_spi_from_pins_native(self, parse_pin_names(pins), requested_bus, requested_cs, role_hints);
+             },
+             "pins"_a, "requested_bus"_a = -1, "requested_cs"_a = -1, "role_hints"_a = std::vector<std::string>{},
+             "Native helper used by the Python SPI wrapper for pin-only bus inference.")
+        .def("_infer_uart_from_pins_native",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& pins,
+                               int requested_bus,
+                               const std::vector<std::string>& role_hints) {
+                 return infer_uart_from_pins_native(self, parse_pin_names(pins), requested_bus, role_hints);
+             },
+             "pins"_a, "requested_bus"_a = -1, "role_hints"_a = std::vector<std::string>{},
+             "Native helper used by the Python UART wrapper for pin-only bus inference.")
+        .def("_infer_i2c_from_pins_native",
+             [parse_pin_names](vp::Controller& self,
+                               const py::object& pins,
+                               int requested_bus,
+                               const std::vector<std::string>& role_hints) {
+                 return infer_i2c_from_pins_native(self, parse_pin_names(pins), requested_bus, role_hints);
+             },
+             "pins"_a, "requested_bus"_a = -1, "role_hints"_a = std::vector<std::string>{},
+             "Native helper used by the Python I2C wrapper for pin-only bus inference.")
+        .def("_infer_pwm_from_pin_native",
+             [](vp::Controller& self, const std::string& pin, int requested_channel) {
+                 return infer_pwm_from_pin_native(self, pin, requested_channel);
+             },
+             "pin"_a, "requested_channel"_a = -1,
+             "Native helper used by the Python PWM wrapper for pin-only channel inference.")
         .def("setup_spi",
              [parse_pin_names](vp::Controller& self,
                                const py::object& spi,

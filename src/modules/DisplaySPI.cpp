@@ -65,6 +65,8 @@ constexpr char kDefaultBackend[] = "auto";
 constexpr uint32_t kDefaultSpeedHz = 50000000;
 constexpr uint32_t kDefaultSourceClockHz = 200000000;
 constexpr size_t kDefaultTransferChunkSize = 4096;
+constexpr size_t kDefaultHwRegTransferChunkSize = 32768;
+constexpr size_t kMinHwRegTransferChunkSize = 4096;
 
 constexpr uintptr_t kRv1106Spi0Base = 0xff500000;
 constexpr uintptr_t kRv1106Spi1Base = 0xff510000;
@@ -1250,9 +1252,15 @@ void register_spi_transfer(ImplT& impl, const void* data, size_t len) {
     if (impl.hw_fd >= 0 && !impl.hw_reg_accel_unavailable) {
         const uint8_t* ptr = static_cast<const uint8_t*>(data);
         size_t offset = 0;
+        size_t hw_chunk_limit = impl.config.transfer_chunk_size;
+        if (hw_chunk_limit == 0 || hw_chunk_limit == kDefaultTransferChunkSize) {
+            hw_chunk_limit = kDefaultHwRegTransferChunkSize;
+        }
+        hw_chunk_limit = std::max<size_t>(kMinHwRegTransferChunkSize,
+                                          std::min<size_t>(hw_chunk_limit, kSpiMaxTransferLen));
         bool completed_by_hw = true;
         while (offset < len) {
-            const size_t chunk = std::min<size_t>(len - offset, 1024 * 1024);
+            size_t chunk = std::min<size_t>(len - offset, hw_chunk_limit);
             visiong_hw_spi_reg_transfer request{};
             request.size = sizeof(request);
             request.bus = static_cast<uint32_t>(impl.spi_index);
@@ -1271,6 +1279,10 @@ void register_spi_transfer(ImplT& impl, const void* data, size_t len) {
                     impl.hw_reg_accel_unavailable = true;
                     completed_by_hw = false;
                     break;
+                }
+                if ((errno == ENOMEM || errno == EAGAIN) && hw_chunk_limit > kMinHwRegTransferChunkSize) {
+                    hw_chunk_limit = std::max<size_t>(kMinHwRegTransferChunkSize, hw_chunk_limit / 2);
+                    continue;
                 }
                 throw std::runtime_error("[DisplaySPI] HW register SPI transfer failed: " +
                                          std::string(std::strerror(errno)));
