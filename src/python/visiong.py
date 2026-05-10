@@ -10,9 +10,18 @@ import time
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _RTLD_NOW = getattr(os, "RTLD_NOW", 2)
+_RTLD_LAZY = getattr(os, "RTLD_LAZY", 1)
 _RTLD_GLOBAL = getattr(os, "RTLD_GLOBAL", 0x100)
 _RTLD_MODE = _RTLD_NOW | _RTLD_GLOBAL
+_PRELOAD_MODE = _RTLD_LAZY | _RTLD_GLOBAL
 _LD_MARKER = "_VISIONG_LD_PATH_READY"
+
+
+def _python_restart_argv():
+    original = getattr(sys, "orig_argv", None)
+    if original and len(original) > 1:
+        return [sys.executable] + list(original[1:])
+    return [sys.executable] + (sys.argv if sys.argv else [])
 
 
 def _ensure_loader_library_path():
@@ -32,24 +41,43 @@ def _ensure_loader_library_path():
     os.environ["LD_LIBRARY_PATH"] = ":".join(required_paths + entries)
 
     exe = sys.executable
+    if not sys.argv:
+        return
+    if sys.argv[0] == "":
+        if sys.stdin is not None and sys.stdin.isatty() and exe:
+            os.execv(exe, [exe, "-i", "-c", "import visiong"])
+        return
+    if sys.argv[0] == "-c":
+        if exe:
+            os.execv(exe, _python_restart_argv())
+        return
+    if sys.argv[0] == "-":
+        return
+
     if exe:
-        argv = [exe] + (sys.argv if sys.argv else [])
-        os.execv(exe, argv)
+        os.execv(exe, _python_restart_argv())
 
 
-def _preload_rockit_global():
-    candidates = (
-        os.path.join(_MODULE_DIR, "librockit.so"),
-        "/oem/usr/lib/librockit.so",
-        os.path.join(_MODULE_DIR, "librockit_full.so"),
-        "/oem/usr/lib/librockit_full.so",
+def _preload_vendor_libraries_global():
+    search_dirs = (_MODULE_DIR, "/oem/usr/lib")
+    libraries = (
+        "librga.so",
+        "librockchip_mpp.so.1",
+        "librockit.so",
+        "librockit_full.so",
+        "librkaiq.so",
+        "librockiva.so",
+        "librknnmrt.so",
+        "librve.so",
+        "libivs.so",
     )
-    for lib in candidates:
-        try:
-            ctypes.CDLL(lib, mode=_RTLD_MODE)
-            return
-        except OSError:
-            continue
+    for name in libraries:
+        for directory in search_dirs:
+            try:
+                ctypes.CDLL(os.path.join(directory, name), mode=_PRELOAD_MODE)
+                break
+            except OSError:
+                continue
 
 
 _ensure_loader_library_path()
@@ -59,7 +87,7 @@ try:
     if _MODULE_DIR not in sys.path:
         sys.path.insert(0, _MODULE_DIR)
     sys.setdlopenflags(_RTLD_MODE)
-    _preload_rockit_global()
+    _preload_vendor_libraries_global()
     _mod = importlib.import_module("_visiong")
 finally:
     try:
@@ -73,8 +101,90 @@ for _name in dir(_mod):
     globals()[_name] = getattr(_mod, _name)
 
 
+_NativeDisplaySPI = globals().get("DisplaySPI")
+_SHORT_GPIO_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)_?(?P<group>[A-Da-d])(?P<index>[0-7])(?:_d)?$")
+_GPIO_OFFSET_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)[-:](?P<pin>\d+)$", re.IGNORECASE)
+
+
+def _gpio_offset_to_name(bank, pin):
+    bank = int(bank)
+    pin = int(pin)
+    if pin < 0 or pin > 31:
+        raise ValueError(f"invalid GPIO pin offset: {pin}")
+    return f"GPIO{bank}_{chr(ord('A') + pin // 8)}{pin % 8}"
+
+
+def _normalize_pin_name(pin):
+    text = str(getattr(pin, "id", pin)).strip()
+    match = _SHORT_GPIO_PIN_PATTERN.match(text)
+    if match:
+        return f"GPIO{int(match.group('bank'))}_{match.group('group').upper()}{int(match.group('index'))}"
+    match = _GPIO_OFFSET_PIN_PATTERN.match(text)
+    if match:
+        return _gpio_offset_to_name(match.group("bank"), match.group("pin"))
+    return text
+
+
 def _pin_name(pin):
-    return str(getattr(pin, "id", pin))
+    return _normalize_pin_name(pin)
+
+
+def _looks_like_pin(value):
+    if value is None:
+        return False
+    text = str(getattr(value, "id", value)).strip()
+    return bool(_SHORT_GPIO_PIN_PATTERN.match(text) or _GPIO_OFFSET_PIN_PATTERN.match(text))
+
+
+def _is_int_like(value):
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    text = str(value).strip().replace("_", "")
+    return bool(re.match(r"^[+-]?\d+$", text))
+
+
+def _int_like_value(value):
+    return int(str(value).strip().replace("_", ""))
+
+
+def _split_trailing_int(values):
+    values = list(values or [])
+    if values and not _looks_like_pin(values[-1]) and _is_int_like(values[-1]):
+        return values[:-1], _int_like_value(values[-1])
+    return values, None
+
+
+def _collect_positional_values(id_value, args):
+    if _looks_like_pin(id_value):
+        return None, [id_value] + list(args)
+    return id_value, list(args)
+
+
+def _looks_like_spi_bus(value):
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return bool(
+        text.startswith("/dev/spidev")
+        or re.match(r"^(?:/dev/)?spidev\d+\.\d+$", text)
+        or re.match(r"^spi\d+\.\d+$", text)
+    )
+
+
+def _normalize_spi_bus(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    lower = text.lower()
+    if lower.startswith("/dev/"):
+        return text
+    if lower.startswith("spidev"):
+        return "/dev/" + text
+    if lower.startswith("spi") and "." in lower:
+        return "/dev/spidev" + text[3:]
+    return text
 
 
 def _append_pin_names(out, value):
@@ -91,8 +201,11 @@ def _append_pin_names(out, value):
             out.append(_pin_name(item))
 
 
-def _normal_token(value):
-    return str(value).strip().lower().replace("_", "-")
+def _append_pin_with_role(out, roles, value, role=None):
+    before = len(out)
+    _append_pin_names(out, value)
+    for _ in range(len(out) - before):
+        roles.append(role)
 
 
 def _backend_name(value):
@@ -100,936 +213,26 @@ def _backend_name(value):
     return text or "auto"
 
 
-def _ioc(direction, magic, number, size):
-    nr_bits = 8
-    type_bits = 8
-    size_bits = 14
-    nr_shift = 0
-    type_shift = nr_shift + nr_bits
-    size_shift = type_shift + type_bits
-    dir_shift = size_shift + size_bits
-    return (
-        (int(direction) << dir_shift)
-        | (int(magic) << type_shift)
-        | (int(number) << nr_shift)
-        | (int(size) << size_shift)
-    )
+_HW_LOAD_WARNED = set()
 
 
-class HWReg:
-    def __init__(self, hw, block, base_offset=0):
-        self._hw = hw
-        self.block = block
-        self.base_offset = int(base_offset)
-
-    def read32(self, offset):
-        return self._hw.read32(self.block, self.base_offset + int(offset))
-
-    def write32(self, offset, value, mask=0xFFFFFFFF, *, hiword=False):
-        return self._hw.write32(self.block, self.base_offset + int(offset), value, mask=mask, hiword=hiword)
-
-    def update32(self, offset, mask, value):
-        return self.write32(offset, value, mask=mask)
-
-    def set_bits(self, offset, mask):
-        old = self.read32(offset)
-        return self.write32(offset, old | int(mask), mask=int(mask))
-
-    def clear_bits(self, offset, mask):
-        return self.write32(offset, 0, mask=int(mask))
-
-    def __repr__(self):
-        return f"HWReg(block='{self.block}', base_offset=0x{self.base_offset:x})"
-
-
-class HW:
-    FEATURE_REG_ACCESS = 1 << 0
-    FEATURE_PIN_SESSION = 1 << 1
-    FEATURE_GPIO_IRQ = 1 << 2
-    FEATURE_DMA_BUFFER = 1 << 3
-    FEATURE_DMA_MEMCPY = 1 << 4
-    FEATURE_SPI_DISPLAY = 1 << 5
-    FEATURE_DMA_FILL = 1 << 6
-    FEATURE_SPI_REG = 1 << 7
-
-    REG_FLAG_HIWORD_UPDATE = 1 << 0
-    DMA_ALLOC_WRITE_COMBINE = 1 << 0
-    DMA_SYNC_BIDIRECTIONAL = 0
-    DMA_SYNC_TO_DEVICE = 1
-    DMA_SYNC_FROM_DEVICE = 2
-    DMA_SYNC_START = 1 << 0
-    DMA_SYNC_END = 1 << 1
-    DMA_MEMCPY_ASYNC = 1 << 0
-    DMA_MEMCPY_STATUS_DONE = 0
-    DMA_MEMCPY_STATUS_TIMEOUT = 1
-    DMA_MEMCPY_STATUS_ERROR = 2
-    DMA_MEMCPY_STATUS_PENDING = 3
-    SPI_REG_TX_ONLY = 1 << 0
-    IRQ_EDGE_RISING = 1 << 0
-    IRQ_EDGE_FALLING = 1 << 1
-    IRQ_EDGE_BOTH = IRQ_EDGE_RISING | IRQ_EDGE_FALLING
-
-    _PATH = "/dev/visiong-hw"
-    _MAGIC = ord("V")
-    _IOC_WRITE = 1
-    _IOC_READ = 2
-    _CAPS_STRUCT = struct.Struct("=16I")
-    _REG_STRUCT = struct.Struct("=8I")
-    _DMA_ALLOC_STRUCT = struct.Struct("=IIIiIIII")
-    _DMA_SYNC_STRUCT = struct.Struct("=IiIIIIIIII")
-    _DMA_MEMCPY_STRUCT = struct.Struct("=IiiIIIIIIIII")
-    _DMA_FILL_STRUCT = struct.Struct("=Ii10I")
-    _IRQ_REQ_STRUCT = struct.Struct("=10I")
-    _SPI_OPEN_STRUCT = struct.Struct("=16I")
-    _SPI_SUBMIT_STRUCT = struct.Struct("=IIi13I")
-    _SPI_REG_TRANSFER_STRUCT = struct.Struct("=8IQQ8I")
-    _SPI_REG_RELEASE_STRUCT = struct.Struct("=8I")
-    _WAIT_STRUCT = struct.Struct("=IIiIIIIIII")
-    _GET_CAPS = _ioc(_IOC_READ, _MAGIC, 0x00, _CAPS_STRUCT.size)
-    _REG_READ = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x10, _REG_STRUCT.size)
-    _REG_WRITE = _ioc(_IOC_WRITE, _MAGIC, 0x11, _REG_STRUCT.size)
-    _DMA_ALLOC = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x20, _DMA_ALLOC_STRUCT.size)
-    _DMA_SYNC = _ioc(_IOC_WRITE, _MAGIC, 0x21, _DMA_SYNC_STRUCT.size)
-    _DMA_MEMCPY = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x22, _DMA_MEMCPY_STRUCT.size)
-    _DMA_WAIT = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x23, _WAIT_STRUCT.size)
-    _DMA_FILL = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x24, _DMA_FILL_STRUCT.size)
-    _IRQ_REQUEST = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x30, _IRQ_REQ_STRUCT.size)
-    _IRQ_WAIT = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x31, _WAIT_STRUCT.size)
-    _IRQ_RELEASE = _ioc(_IOC_WRITE, _MAGIC, 0x32, _WAIT_STRUCT.size)
-    _SPI_DISPLAY_OPEN = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x40, _SPI_OPEN_STRUCT.size)
-    _SPI_DISPLAY_SUBMIT = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x41, _SPI_SUBMIT_STRUCT.size)
-    _SPI_DISPLAY_WAIT = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x42, _WAIT_STRUCT.size)
-    _SPI_DISPLAY_CLOSE = _ioc(_IOC_WRITE, _MAGIC, 0x43, _WAIT_STRUCT.size)
-    _SPI_REG_TRANSFER = _ioc(_IOC_READ | _IOC_WRITE, _MAGIC, 0x44, _SPI_REG_TRANSFER_STRUCT.size)
-    _SPI_REG_RELEASE = _ioc(_IOC_WRITE, _MAGIC, 0x45, _SPI_REG_RELEASE_STRUCT.size)
-
-    _BLOCKS = {
-        "ioc": 0,
-        "gpio": 0,
-        "pinctrl": 0,
-        "pmuioc": 1,
-        "cru": 2,
-        "clock": 2,
-        "gpio0": 3,
-        "gpio1": 4,
-        "gpio2": 5,
-        "gpio3": 6,
-        "gpio4": 7,
-        "spi0": 8,
-        "spi1": 9,
-        "i2c0": 10,
-        "i2c1": 11,
-        "i2c2": 12,
-        "i2c3": 13,
-        "i2c4": 14,
-        "uart0": 15,
-        "serial0": 15,
-        "uart1": 16,
-        "serial1": 16,
-        "uart2": 17,
-        "serial2": 17,
-        "uart3": 18,
-        "serial3": 18,
-        "uart4": 19,
-        "serial4": 19,
-        "uart5": 20,
-        "serial5": 20,
-        "pwm0_3": 21,
-        "pwm4_7": 22,
-        "pwm8_11": 23,
-        "dmac": 24,
-        "dma": 24,
-        "gicd": 25,
-        "gic": 25,
-    }
-
-    def __init__(self, path=None, *, required=False, autoload=True):
-        self.path = path or self._PATH
-        self._fd = None
-        if autoload and not os.path.exists(self.path):
-            self.load()
-        try:
-            self._fd = os.open(self.path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
-        except OSError:
-            if required:
-                raise
-
-    @staticmethod
-    def is_available(path=None):
-        path = path or HW._PATH
-        try:
-            fd = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
-            os.close(fd)
-            return True
-        except OSError:
+def _try_load_hw_accel(context):
+    try:
+        if "HW" not in globals():
             return False
-
-    @staticmethod
-    def module_candidates(module_path=None):
-        if module_path:
-            return [module_path]
-        return [
-            os.path.join(_MODULE_DIR, "visiong_hw.ko"),
-            os.path.join(_MODULE_DIR, "drivers", "visiong_hw.ko"),
-            os.path.join(os.getcwd(), "visiong_hw.ko"),
-        ]
-
-    @staticmethod
-    def load(module_path=None):
         if HW.is_available():
             return True
-        import subprocess
-
-        for candidate in HW.module_candidates(module_path):
-            if not candidate or not os.path.exists(candidate):
-                continue
-            proc = subprocess.run(["insmod", candidate], capture_output=True, text=True)
-            if proc.returncode == 0 or HW.is_available():
-                return True
-            message = (proc.stderr or proc.stdout or "").lower()
-            if "file exists" in message or "already exists" in message:
-                return HW.is_available()
-        return HW.is_available()
-
-    ensure_loaded = load
-
-    def available(self):
-        return self._fd is not None
-
-    def _require_fd(self):
-        if self._fd is None:
-            raise RuntimeError(f"{self.path} is unavailable; build/load visiong_hw.ko or use existing fallbacks")
-        return self._fd
-
-    @classmethod
-    def _block_offset(cls, block):
-        if isinstance(block, int):
-            return int(block), 0
-        token = str(block).strip().lower().replace("-", "_")
-        match = re.fullmatch(r"pwm(\d+)", token)
-        if match:
-            channel = int(match.group(1))
-            if 0 <= channel <= 3:
-                return cls._BLOCKS["pwm0_3"], channel * 0x10
-            if 4 <= channel <= 7:
-                return cls._BLOCKS["pwm4_7"], (channel - 4) * 0x10
-            if 8 <= channel <= 11:
-                return cls._BLOCKS["pwm8_11"], (channel - 8) * 0x10
-        if token not in cls._BLOCKS:
-            raise ValueError(f"unknown visiong-hw register block: {block!r}")
-        return cls._BLOCKS[token], 0
-
-    def caps(self):
-        import fcntl
-
-        fd = self._require_fd()
-        buf = bytearray(self._CAPS_STRUCT.size)
-        self._CAPS_STRUCT.pack_into(buf, 0, self._CAPS_STRUCT.size, *([0] * 15))
-        fcntl.ioctl(fd, self._GET_CAPS, buf, True)
-        values = self._CAPS_STRUCT.unpack(bytes(buf))
-        feature_flags = values[3]
-        return {
-            "size": values[0],
-            "abi_version": values[1],
-            "driver_version": values[2],
-            "feature_flags": feature_flags,
-            "reg_access": bool(feature_flags & self.FEATURE_REG_ACCESS),
-            "pin_session": bool(feature_flags & self.FEATURE_PIN_SESSION),
-            "gpio_irq": bool(feature_flags & self.FEATURE_GPIO_IRQ),
-            "dma_buffer": bool(feature_flags & self.FEATURE_DMA_BUFFER),
-            "dma_memcpy": bool(feature_flags & self.FEATURE_DMA_MEMCPY),
-            "spi_display": bool(feature_flags & self.FEATURE_SPI_DISPLAY),
-            "dma_fill": bool(feature_flags & self.FEATURE_DMA_FILL),
-            "spi_reg": bool(feature_flags & self.FEATURE_SPI_REG),
-            "chip_id": values[4],
-            "max_dma_bytes": values[5],
-            "max_transfer_bytes": values[6],
-        }
-
-    def read32(self, block, offset):
-        import fcntl
-
-        block_id, base_offset = self._block_offset(block)
-        buf = bytearray(self._REG_STRUCT.size)
-        self._REG_STRUCT.pack_into(buf, 0, self._REG_STRUCT.size, block_id, base_offset + int(offset), 0, 0, 0, 0, 0)
-        fcntl.ioctl(self._require_fd(), self._REG_READ, buf, True)
-        return self._REG_STRUCT.unpack(bytes(buf))[3]
-
-    def write32(self, block, offset, value, mask=0xFFFFFFFF, *, hiword=False):
-        import fcntl
-
-        block_id, base_offset = self._block_offset(block)
-        flags = self.REG_FLAG_HIWORD_UPDATE if hiword else 0
-        buf = self._REG_STRUCT.pack(
-            self._REG_STRUCT.size,
-            block_id,
-            base_offset + int(offset),
-            int(value) & 0xFFFFFFFF,
-            int(mask) & 0xFFFFFFFF,
-            flags,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._REG_WRITE, buf)
-        return None
-
-    def update32(self, block, offset, mask, value):
-        return self.write32(block, offset, value, mask=mask)
-
-    def reg(self, block):
-        block_id, base_offset = self._block_offset(block)
-        return HWReg(self, block_id, base_offset)
-
-    @classmethod
-    def _dma_direction(cls, direction):
-        if isinstance(direction, int):
-            return int(direction)
-        text = str(direction or "bidirectional").strip().lower().replace("-", "_")
-        if text in ("to_device", "cpu_to_device", "write", "out", "tx"):
-            return cls.DMA_SYNC_TO_DEVICE
-        if text in ("from_device", "device_to_cpu", "read", "in", "rx"):
-            return cls.DMA_SYNC_FROM_DEVICE
-        if text in ("bidirectional", "bidir", "both"):
-            return cls.DMA_SYNC_BIDIRECTIONAL
-        raise ValueError("DMA direction must be to_device, from_device, or bidirectional")
-
-    @classmethod
-    def _irq_edge(cls, edge):
-        if isinstance(edge, int):
-            return int(edge)
-        text = str(edge or "both").strip().lower()
-        if text in ("rising", "rise"):
-            return cls.IRQ_EDGE_RISING
-        if text in ("falling", "fall"):
-            return cls.IRQ_EDGE_FALLING
-        if text in ("both", "any"):
-            return cls.IRQ_EDGE_BOTH
-        raise ValueError("IRQ edge must be rising, falling, or both")
-
-    def dma_alloc(self, size, *, write_combine=False):
-        import fcntl
-
-        flags = self.DMA_ALLOC_WRITE_COMBINE if write_combine else 0
-        buf = bytearray(self._DMA_ALLOC_STRUCT.size)
-        self._DMA_ALLOC_STRUCT.pack_into(buf, 0, self._DMA_ALLOC_STRUCT.size, int(size), flags, -1, 0, 0, 0, 0)
-        fcntl.ioctl(self._require_fd(), self._DMA_ALLOC, buf, True)
-        values = self._DMA_ALLOC_STRUCT.unpack(bytes(buf))
-        fd = values[3]
-        actual_size = values[1]
-        if fd < 0:
-            raise OSError("visiong-hw DMA allocation did not return a valid fd")
-        return HWDmaBuffer(self, actual_size, fd)
-
-    def dma_sync_for_cpu(self, buffer, direction="from_device", *, offset=0, size=0):
-        return self._dma_sync(buffer, direction, self.DMA_SYNC_START, offset=offset, size=size)
-
-    def dma_sync_for_device(self, buffer, direction="to_device", *, offset=0, size=0):
-        return self._dma_sync(buffer, direction, self.DMA_SYNC_END, offset=offset, size=size)
-
-    def _dma_sync(self, buffer, direction, flags, *, offset=0, size=0):
-        import fcntl
-
-        fd = getattr(buffer, "fd", buffer)
-        data = self._DMA_SYNC_STRUCT.pack(
-            self._DMA_SYNC_STRUCT.size,
-            int(fd),
-            self._dma_direction(direction),
-            int(flags),
-            int(offset),
-            int(size),
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._DMA_SYNC, data)
-        return None
-
-    def dma_memcpy(self, dst, src, size=None, *, dst_offset=0, src_offset=0, wait=True):
-        import fcntl
-
-        dst_fd = getattr(dst, "fd", dst)
-        src_fd = getattr(src, "fd", src)
-        if size is None:
-            dst_size = getattr(dst, "size", None)
-            src_size = getattr(src, "size", None)
-            if dst_size is None or src_size is None:
-                raise ValueError("dma_memcpy size is required when dst/src are raw fds")
-            size = min(int(dst_size) - int(dst_offset), int(src_size) - int(src_offset))
-        if int(size) <= 0:
-            raise ValueError("dma_memcpy size must be positive")
-        flags = 0 if wait else self.DMA_MEMCPY_ASYNC
-        buf = bytearray(self._DMA_MEMCPY_STRUCT.size)
-        self._DMA_MEMCPY_STRUCT.pack_into(
-            buf,
-            0,
-            self._DMA_MEMCPY_STRUCT.size,
-            int(dst_fd),
-            int(src_fd),
-            int(dst_offset),
-            int(src_offset),
-            int(size),
-            flags,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._DMA_MEMCPY, buf, True)
-        values = self._DMA_MEMCPY_STRUCT.unpack(bytes(buf))
-        status = values[7]
-        handle = values[8]
-        if wait:
-            if status != self.DMA_MEMCPY_STATUS_DONE:
-                raise OSError(f"visiong-hw DMA memcpy failed with status {status}")
-            return int(size)
-        if status != self.DMA_MEMCPY_STATUS_PENDING or not handle:
-            raise OSError(f"visiong-hw DMA memcpy failed with status {status}")
-        return HWDmaCopy(self, handle, int(size))
-
-    def dma_submit_memcpy(self, dst, src, size=None, *, dst_offset=0, src_offset=0):
-        return self.dma_memcpy(dst, src, size, dst_offset=dst_offset, src_offset=src_offset, wait=False)
-
-    def dma_fill(self, buffer, value=0, size=None, *, offset=0):
-        import fcntl
-
-        fd = getattr(buffer, "fd", buffer)
-        if size is None:
-            buffer_size = getattr(buffer, "size", None)
-            if buffer_size is None:
-                raise ValueError("dma_fill size is required when buffer is a raw fd")
-            size = int(buffer_size) - int(offset)
-        if int(size) <= 0:
-            raise ValueError("dma_fill size must be positive")
-        buf = bytearray(self._DMA_FILL_STRUCT.size)
-        self._DMA_FILL_STRUCT.pack_into(
-            buf,
-            0,
-            self._DMA_FILL_STRUCT.size,
-            int(fd),
-            int(offset),
-            int(size),
-            int(value) & 0xFF,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._DMA_FILL, buf, True)
-        values = self._DMA_FILL_STRUCT.unpack(bytes(buf))
-        status = values[6]
-        if status != self.DMA_MEMCPY_STATUS_DONE:
-            raise OSError(f"visiong-hw DMA fill failed with status {status}")
-        return int(size)
-
-    def irq(self, pin=None, *, bank=None, pin_index=None, edge="both"):
-        import fcntl
-
-        if pin is not None:
-            if isinstance(pin, (list, tuple)) and len(pin) == 2:
-                bank, pin_index = int(pin[0]), int(pin[1])
-            else:
-                bank, pin_index = _parse_gpio_pin(pin)
-        if bank is None or pin_index is None:
-            raise ValueError("irq() requires pin='GPIO1_C3' or bank=1, pin_index=19")
-        buf = bytearray(self._IRQ_REQ_STRUCT.size)
-        self._IRQ_REQ_STRUCT.pack_into(
-            buf,
-            0,
-            self._IRQ_REQ_STRUCT.size,
-            int(bank),
-            int(pin_index),
-            self._irq_edge(edge),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._IRQ_REQUEST, buf, True)
-        values = self._IRQ_REQ_STRUCT.unpack(bytes(buf))
-        return HWIRQ(self, values[5], int(bank), int(pin_index), edge)
-
-    def spi_open(self, bus="spi0.0", *, chip_select=None, speed_hz=24_000_000, width=0, height=0, rotation=0):
-        import fcntl
-
-        if isinstance(bus, str):
-            match = re.fullmatch(r"spi(\d+)(?:\.(\d+))?", bus.strip().lower())
-            if not match:
-                raise ValueError("spi_open bus must be like 'spi0.0' or an integer bus id")
-            bus_id = int(match.group(1))
-            if chip_select is None:
-                chip_select = int(match.group(2) or 0)
-        else:
-            bus_id = int(bus)
-            if chip_select is None:
-                chip_select = 0
-        buf = bytearray(self._SPI_OPEN_STRUCT.size)
-        self._SPI_OPEN_STRUCT.pack_into(
-            buf,
-            0,
-            self._SPI_OPEN_STRUCT.size,
-            bus_id,
-            int(chip_select),
-            int(width),
-            int(height),
-            int(rotation),
-            int(speed_hz),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._SPI_DISPLAY_OPEN, buf, True)
-        values = self._SPI_OPEN_STRUCT.unpack(bytes(buf))
-        handle = values[8]
-        if not handle:
-            raise OSError("visiong-hw SPI open did not return a handle")
-        return HWSPI(self, handle, bus_id, int(chip_select), int(speed_hz))
-
-    def _spi_reg_transfer(
-        self,
-        bus,
-        chip_select,
-        tx_data=b"",
-        rx_len=0,
-        *,
-        tx_only=False,
-        speed_hz=50_000_000,
-        source_clock_hz=200_000_000,
-        mode=0,
-        bits_per_word=8,
-        dummy=0xFF,
-    ):
-        import ctypes
-        import fcntl
-
-        tx_data = bytes(tx_data or b"")
-        rx_len = int(rx_len)
-        flags = self.SPI_REG_TX_ONLY if tx_only else 0
-        keepalive = []
-        tx_ptr = 0
-        rx_ptr = 0
-        if tx_data:
-            tx_buf = ctypes.create_string_buffer(tx_data)
-            keepalive.append(tx_buf)
-            tx_ptr = ctypes.addressof(tx_buf)
-        rx_data = bytearray(rx_len)
-        if rx_len:
-            rx_buf = (ctypes.c_uint8 * rx_len).from_buffer(rx_data)
-            keepalive.append(rx_buf)
-            rx_ptr = ctypes.addressof(rx_buf)
-        buf = bytearray(self._SPI_REG_TRANSFER_STRUCT.size)
-        self._SPI_REG_TRANSFER_STRUCT.pack_into(
-            buf,
-            0,
-            self._SPI_REG_TRANSFER_STRUCT.size,
-            int(bus),
-            int(chip_select),
-            int(speed_hz),
-            int(source_clock_hz),
-            int(mode),
-            int(bits_per_word),
-            flags,
-            tx_ptr,
-            rx_ptr,
-            len(tx_data),
-            rx_len,
-            0,
-            0,
-            int(dummy) & 0xFF,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._SPI_REG_TRANSFER, buf, True)
-        values = self._SPI_REG_TRANSFER_STRUCT.unpack(bytes(buf))
-        status = values[12]
-        transferred = values[13]
-        if status != self.DMA_MEMCPY_STATUS_DONE:
-            raise OSError(f"visiong-hw SPI register transfer failed with status {status}")
-        return int(transferred) if tx_only else bytes(rx_data[:rx_len])
-
-    def _spi_reg_release(self, bus):
-        import fcntl
-
-        buf = self._SPI_REG_RELEASE_STRUCT.pack(
-            self._SPI_REG_RELEASE_STRUCT.size,
-            int(bus),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self._require_fd(), self._SPI_REG_RELEASE, buf)
-        return None
-
-    def close(self):
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    def __enter__(self):
-        self._require_fd()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-        return False
-
-    def __repr__(self):
-        state = "open" if self._fd is not None else "unavailable"
-        return f"HW(path='{self.path}', state='{state}')"
-
-
-class HWDmaBuffer:
-    def __init__(self, hw, size, fd):
-        self.hw = hw
-        self.size = int(size)
-        self.fd = int(fd)
-
-    def mmap(self, *, access=None):
-        import mmap
-
-        if access is None:
-            access = mmap.ACCESS_WRITE
-        return mmap.mmap(self.fd, self.size, access=access)
-
-    def sync_for_cpu(self, direction="from_device", *, offset=0, size=0):
-        return self.hw.dma_sync_for_cpu(self, direction, offset=offset, size=size)
-
-    def sync_for_device(self, direction="to_device", *, offset=0, size=0):
-        return self.hw.dma_sync_for_device(self, direction, offset=offset, size=size)
-
-    def fill(self, value=0, size=None, *, offset=0):
-        return self.hw.dma_fill(self, value=value, size=size, offset=offset)
-
-    def close(self):
-        if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-        return False
-
-    def __repr__(self):
-        return f"HWDmaBuffer(size={self.size}, fd={self.fd})"
-
-
-class HWDmaCopy:
-    def __init__(self, hw, handle, size):
-        self.hw = hw
-        self.handle = int(handle)
-        self.size = int(size)
-        self.timestamp_ns = 0
-        self._done = False
-
-    def wait(self, timeout_ms=-1):
-        import fcntl
-
-        if self._done:
+        loaded = bool(HW.load())
+        if loaded or HW.is_available():
             return True
-        buf = bytearray(self.hw._WAIT_STRUCT.size)
-        self.hw._WAIT_STRUCT.pack_into(
-            buf,
-            0,
-            self.hw._WAIT_STRUCT.size,
-            self.handle,
-            int(timeout_ms),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._DMA_WAIT, buf, True)
-        values = self.hw._WAIT_STRUCT.unpack(bytes(buf))
-        status = values[3]
-        self.timestamp_ns = int(values[4]) | (int(values[5]) << 32)
-        if status == self.hw.DMA_MEMCPY_STATUS_TIMEOUT:
-            return False
-        if status != self.hw.DMA_MEMCPY_STATUS_DONE:
-            raise OSError(f"visiong-hw DMA memcpy wait failed with status {status}")
-        self._done = True
-        return True
+        message = "visiong_hw.ko is unavailable; falling back to native PIO register transfer."
+    except Exception as exc:
+        message = f"visiong_hw.ko load failed ({exc}); falling back to native PIO register transfer."
 
-    def done(self):
-        return self._done
-
-    def __del__(self):
-        if not self._done:
-            try:
-                self.wait(0)
-            except Exception:
-                pass
-
-    def __repr__(self):
-        state = "done" if self._done else "pending"
-        return f"HWDmaCopy(handle={self.handle}, size={self.size}, state='{state}')"
-
-
-class HWSPITransfer:
-    def __init__(self, spi, handle, size):
-        self.spi = spi
-        self.hw = spi.hw
-        self.handle = int(handle)
-        self.size = int(size)
-        self.timestamp_ns = 0
-        self._done = False
-
-    def wait(self, timeout_ms=-1):
-        import fcntl
-
-        if self._done:
-            return True
-        buf = bytearray(self.hw._WAIT_STRUCT.size)
-        self.hw._WAIT_STRUCT.pack_into(
-            buf,
-            0,
-            self.hw._WAIT_STRUCT.size,
-            self.handle,
-            int(timeout_ms),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._SPI_DISPLAY_WAIT, buf, True)
-        values = self.hw._WAIT_STRUCT.unpack(bytes(buf))
-        status = values[3]
-        self.timestamp_ns = int(values[4]) | (int(values[5]) << 32)
-        if status == self.hw.DMA_MEMCPY_STATUS_TIMEOUT:
-            return False
-        if status != self.hw.DMA_MEMCPY_STATUS_DONE:
-            raise OSError(f"visiong-hw SPI transfer failed with status {status}")
-        self._done = True
-        return True
-
-    def done(self):
-        return self._done
-
-    def __del__(self):
-        if not self._done:
-            try:
-                self.wait(0)
-            except Exception:
-                pass
-
-    def __repr__(self):
-        state = "done" if self._done else "pending"
-        return f"HWSPITransfer(handle={self.handle}, size={self.size}, state='{state}')"
-
-
-class HWSPI:
-    def __init__(self, hw, handle, bus, chip_select, speed_hz):
-        self.hw = hw
-        self.handle = int(handle)
-        self.bus = int(bus)
-        self.chip_select = int(chip_select)
-        self.speed_hz = int(speed_hz)
-
-    def submit_dma(self, buffer, size=None, *, offset=0, wait=False):
-        import fcntl
-
-        if self.handle <= 0:
-            raise RuntimeError("HWSPI is closed")
-        fd = getattr(buffer, "fd", buffer)
-        if size is None:
-            buffer_size = getattr(buffer, "size", None)
-            if buffer_size is None:
-                raise ValueError("submit_dma size is required when buffer is a raw fd")
-            size = int(buffer_size) - int(offset)
-        if int(size) <= 0:
-            raise ValueError("submit_dma size must be positive")
-        buf = bytearray(self.hw._SPI_SUBMIT_STRUCT.size)
-        self.hw._SPI_SUBMIT_STRUCT.pack_into(
-            buf,
-            0,
-            self.hw._SPI_SUBMIT_STRUCT.size,
-            self.handle,
-            int(fd),
-            int(offset),
-            int(size),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._SPI_DISPLAY_SUBMIT, buf, True)
-        values = self.hw._SPI_SUBMIT_STRUCT.unpack(bytes(buf))
-        job_handle = values[12]
-        if not job_handle:
-            raise OSError("visiong-hw SPI submit did not return a job handle")
-        transfer = HWSPITransfer(self, job_handle, int(size))
-        if wait:
-            transfer.wait()
-        return transfer
-
-    def write_dma(self, buffer, size=None, *, offset=0, wait=True):
-        transfer = self.submit_dma(buffer, size=size, offset=offset, wait=wait)
-        return int(size if size is not None else getattr(buffer, "size", 0) - int(offset)) if wait else transfer
-
-    def close(self):
-        import fcntl
-
-        if self.handle <= 0:
-            return None
-        buf = self.hw._WAIT_STRUCT.pack(
-            self.hw._WAIT_STRUCT.size,
-            self.handle,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._SPI_DISPLAY_CLOSE, buf)
-        self.handle = 0
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-        return False
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    def __repr__(self):
-        return f"HWSPI(handle={self.handle}, bus='spi{self.bus}.{self.chip_select}', speed_hz={self.speed_hz})"
-
-
-class HWIRQEvent:
-    def __init__(self, sequence, timestamp_ns, bank, pin):
-        self.sequence = int(sequence)
-        self.timestamp_ns = int(timestamp_ns)
-        self.bank = int(bank)
-        self.pin = int(pin)
-
-    def __bool__(self):
-        return self.sequence > 0
-
-    def __repr__(self):
-        group = chr(ord("A") + self.pin // 8)
-        return f"HWIRQEvent(sequence={self.sequence}, timestamp_ns={self.timestamp_ns}, pin='GPIO{self.bank}_{group}{self.pin % 8}')"
-
-
-class HWIRQ:
-    def __init__(self, hw, handle, bank, pin, edge):
-        self.hw = hw
-        self.handle = int(handle)
-        self.bank = int(bank)
-        self.pin = int(pin)
-        self.edge = edge
-        self.sequence = 0
-
-    def wait(self, timeout_ms=-1):
-        import fcntl
-
-        if self.handle <= 0:
-            raise RuntimeError("HWIRQ is closed")
-        buf = bytearray(self.hw._WAIT_STRUCT.size)
-        self.hw._WAIT_STRUCT.pack_into(
-            buf,
-            0,
-            self.hw._WAIT_STRUCT.size,
-            self.handle,
-            int(timeout_ms),
-            self.sequence,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._IRQ_WAIT, buf, True)
-        values = self.hw._WAIT_STRUCT.unpack(bytes(buf))
-        sequence = values[3]
-        timestamp_ns = int(values[4]) | (int(values[5]) << 32)
-        if sequence == self.sequence and timestamp_ns == 0:
-            return None
-        self.sequence = sequence
-        return HWIRQEvent(sequence, timestamp_ns, self.bank, self.pin)
-
-    def __repr__(self):
-        group = chr(ord("A") + self.pin // 8)
-        return f"HWIRQ(handle={self.handle}, pin='GPIO{self.bank}_{group}{self.pin % 8}', edge='{self.edge}')"
-
-    def close(self):
-        import fcntl
-
-        if self.handle <= 0:
-            return None
-        buf = self.hw._WAIT_STRUCT.pack(
-            self.hw._WAIT_STRUCT.size,
-            self.handle,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        fcntl.ioctl(self.hw._require_fd(), self.hw._IRQ_RELEASE, buf)
-        self.handle = 0
-        return None
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
+    if context not in _HW_LOAD_WARNED:
+        print(f"[{context}] Warning: {message}", file=sys.stderr)
+        _HW_LOAD_WARNED.add(context)
+    return False
 
 
 _PERIPHERAL_LOCKS_GUARD = threading.Lock()
@@ -1076,188 +279,62 @@ def _cru_ungate(cru, offset, bits):
     cru.write32(offset, int(bits) << 16)
 
 
-def _infer_spi_from_pins(pinmux, pins, requested_bus=None, requested_cs=None):
+def _native_role_hints(role_hints, count, peripheral):
+    hints = list(role_hints or [None] * count)
+    if len(hints) != count:
+        raise ValueError(f"{peripheral} role_hints length must match pins length")
+    return ["" if role is None else str(role) for role in hints]
+
+
+def _infer_spi_from_pins(pinmux, pins, requested_bus=None, requested_cs=None, role_hints=None):
     if len(pins) < 3:
         raise ValueError("SPI pins must include clk/sck, cs, and at least one of mosi/miso")
-    pattern = re.compile(r"^(?P<group>spi(?P<bus>\d+)m\d+)-(?P<role>clk|sck|mosi|miso|cs(?P<cs>\d+))$")
-    all_candidates = []
-    for pin in pins:
-        candidates = []
-        for entry in pinmux.list_functions(pin):
-            function = _normal_token(entry.function)
-            group = _normal_token(entry.group)
-            match = pattern.match(group)
-            if not match:
-                continue
-            bus = int(match.group("bus"))
-            if requested_bus is not None and bus != requested_bus:
-                continue
-            role = match.group("role")
-            chip = int(match.group("cs")) if match.group("cs") is not None else None
-            if chip is not None and requested_cs is not None and chip != requested_cs:
-                continue
-            if function and function != f"spi{bus}":
-                continue
-            candidates.append((match.group("group"), bus, role, chip))
-        if not candidates:
-            suffix = "" if requested_bus is None else f" for spi{requested_bus}"
-            raise ValueError(f"{pin} has no SPI alternate function{suffix}")
-        all_candidates.append(candidates)
-
-    common_groups = {item[0] for item in all_candidates[0]}
-    for candidates in all_candidates[1:]:
-        common_groups &= {item[0] for item in candidates}
-    if not common_groups:
-        raise ValueError("SPI pins do not belong to one common spiXmY mux group")
-    if len(common_groups) > 1:
-        names = ", ".join(sorted(common_groups))
-        raise ValueError(f"SPI pins are ambiguous across groups: {names}")
-
-    group = next(iter(common_groups))
-    roles = {}
-    bus = None
-    chip_select = requested_cs
-    for candidates in all_candidates:
-        item = next(value for value in candidates if value[0] == group)
-        bus = item[1]
-        role = "clk" if item[2] == "sck" else item[2]
-        if role.startswith("cs"):
-            chip_select = item[3]
-            role = "cs"
-        if role in roles:
-            raise ValueError(f"duplicate SPI role {role!r} in pin list")
-        roles[role] = True
-
-    if "clk" not in roles or "cs" not in roles or ("mosi" not in roles and "miso" not in roles):
-        raise ValueError("SPI pins must contain clk/sck, cs, and at least one of mosi/miso")
-    return bus, 0 if chip_select is None else chip_select
+    native = getattr(pinmux, "_infer_spi_from_pins_native", None)
+    if native is None:
+        raise RuntimeError("native PinMux SPI inference is unavailable; update _visiong.so")
+    bus, chip_select = native(
+        pins,
+        -1 if requested_bus is None else int(requested_bus),
+        -1 if requested_cs is None else int(requested_cs),
+        _native_role_hints(role_hints, len(pins), "SPI"),
+    )
+    return int(bus), int(chip_select)
 
 
-def _infer_i2c_from_pins(pinmux, pins, requested_bus=None):
+def _infer_i2c_from_pins(pinmux, pins, requested_bus=None, role_hints=None):
     if len(pins) < 2:
         raise ValueError("I2C pins must include scl and sda")
-    pattern = re.compile(r"^(?P<group>i2c(?P<bus>\d+)m\d+)-(?P<role>scl|sda|xfer)$")
-    all_candidates = []
-    for pin in pins:
-        candidates = []
-        for entry in pinmux.list_functions(pin):
-            function = _normal_token(entry.function)
-            group = _normal_token(entry.group)
-            match = pattern.match(group)
-            if not match:
-                continue
-            bus = int(match.group("bus"))
-            if requested_bus is not None and bus != requested_bus:
-                continue
-            if function and function != f"i2c{bus}":
-                continue
-            candidates.append((match.group("group"), bus, match.group("role")))
-        if not candidates:
-            suffix = "" if requested_bus is None else f" for i2c{requested_bus}"
-            raise ValueError(f"{pin} has no I2C alternate function{suffix}")
-        all_candidates.append(candidates)
-
-    common_groups = {item[0] for item in all_candidates[0]}
-    for candidates in all_candidates[1:]:
-        common_groups &= {item[0] for item in candidates}
-    if not common_groups:
-        raise ValueError("I2C pins do not belong to one common i2cXmY mux group")
-    if len(common_groups) > 1:
-        names = ", ".join(sorted(common_groups))
-        raise ValueError(f"I2C pins are ambiguous across groups: {names}")
-
-    group = next(iter(common_groups))
-    roles = {}
-    bus = None
-    for candidates in all_candidates:
-        group_items = [value for value in candidates if value[0] == group]
-        item = next((value for value in group_items if value[2] != "xfer"), group_items[0])
-        bus = item[1]
-        role = item[2]
-        if role == "xfer":
-            continue
-        if role in roles:
-            raise ValueError(f"duplicate I2C role {role!r} in pin list")
-        roles[role] = True
-    if "scl" not in roles or "sda" not in roles:
-        raise ValueError("I2C pins must contain scl and sda from the same group")
-    return bus
+    native = getattr(pinmux, "_infer_i2c_from_pins_native", None)
+    if native is None:
+        raise RuntimeError("native PinMux I2C inference is unavailable; update _visiong.so")
+    (bus,) = native(
+        pins,
+        -1 if requested_bus is None else int(requested_bus),
+        _native_role_hints(role_hints, len(pins), "I2C"),
+    )
+    return int(bus)
 
 
-def _infer_uart_from_pins(pinmux, pins, requested_bus=None):
+def _infer_uart_from_pins(pinmux, pins, requested_bus=None, role_hints=None):
     if not pins:
         raise ValueError("UART pins must include at least tx or rx")
-    pattern = re.compile(r"^(?P<group>uart(?P<bus>\d+)m\d+)-(?P<role>tx|rx|rts|cts|xfer)$")
-    all_candidates = []
-    for pin in pins:
-        candidates = []
-        for entry in pinmux.list_functions(pin):
-            function = _normal_token(entry.function)
-            group = _normal_token(entry.group)
-            match = pattern.match(group)
-            if not match:
-                continue
-            bus = int(match.group("bus"))
-            if requested_bus is not None and bus != requested_bus:
-                continue
-            if function and function != f"uart{bus}":
-                continue
-            candidates.append((match.group("group"), bus, match.group("role")))
-        if not candidates:
-            suffix = "" if requested_bus is None else f" for uart{requested_bus}"
-            raise ValueError(f"{pin} has no UART alternate function{suffix}")
-        all_candidates.append(candidates)
-
-    common_groups = {item[0] for item in all_candidates[0]}
-    for candidates in all_candidates[1:]:
-        common_groups &= {item[0] for item in candidates}
-    if not common_groups:
-        raise ValueError("UART pins do not belong to one common uartXmY mux group")
-    if len(common_groups) > 1:
-        names = ", ".join(sorted(common_groups))
-        raise ValueError(f"UART pins are ambiguous across groups: {names}")
-
-    group = next(iter(common_groups))
-    roles = {}
-    bus = None
-    for candidates in all_candidates:
-        group_items = [value for value in candidates if value[0] == group]
-        item = next((value for value in group_items if value[2] != "xfer"), group_items[0])
-        bus = item[1]
-        role = item[2]
-        if role == "xfer":
-            role = "txrx"
-        if role in roles:
-            raise ValueError(f"duplicate UART role {role!r} in pin list")
-        roles[role] = True
-    if not any(role in roles for role in ("tx", "rx", "txrx")):
-        raise ValueError("UART pins must contain tx or rx from the same group")
-    return bus
+    native = getattr(pinmux, "_infer_uart_from_pins_native", None)
+    if native is None:
+        raise RuntimeError("native PinMux UART inference is unavailable; update _visiong.so")
+    (bus,) = native(
+        pins,
+        -1 if requested_bus is None else int(requested_bus),
+        _native_role_hints(role_hints, len(pins), "UART"),
+    )
+    return int(bus)
 
 
 def _infer_pwm_from_pin(pinmux, pin, requested_channel=None):
-    pattern = re.compile(r"^pwm(?P<channel>\d+)(?:ir)?m\d+$")
-    candidates = []
-    for entry in pinmux.list_functions(pin):
-        function = _normal_token(entry.function)
-        group = _normal_token(entry.group)
-        match = pattern.match(group)
-        if not match:
-            continue
-        channel = int(match.group("channel"))
-        if requested_channel is not None and channel != requested_channel:
-            continue
-        if function and function != f"pwm{channel}":
-            continue
-        candidates.append(channel)
-    if not candidates:
-        suffix = "" if requested_channel is None else f" for pwm{requested_channel}"
-        raise ValueError(f"{pin} has no PWM alternate function{suffix}")
-    unique = sorted(set(candidates))
-    if len(unique) > 1:
-        names = ", ".join(f"pwm{item}" for item in unique)
-        raise ValueError(f"PWM pin is ambiguous across channels: {names}")
-    return unique[0]
+    native = getattr(pinmux, "_infer_pwm_from_pin_native", None)
+    if native is None:
+        raise RuntimeError("native PinMux PWM inference is unavailable; update _visiong.so")
+    (channel,) = native(_pin_name(pin), -1 if requested_channel is None else int(requested_channel))
+    return int(channel)
 
 
 _GPIO_PIN_PATTERN = re.compile(r"^GPIO(?P<bank>\d+)_?(?P<group>[A-Da-d])(?P<index>[0-7])$")
@@ -1613,6 +690,8 @@ def _write_sysfs(path, value):
 
 def _driver_name(link_path):
     try:
+        if not os.path.islink(link_path):
+            return ""
         return os.path.basename(os.path.realpath(link_path))
     except OSError:
         return ""
@@ -1641,7 +720,7 @@ class SPI:
     def __init__(
         self,
         id=None,
-        *,
+        *args,
         baudrate=50_000_000,
         polarity=0,
         phase=0,
@@ -1668,9 +747,6 @@ class SPI:
         self.dummy = int(dummy) & 0xFF
         self._pinmux = PinMux()
         self._fd = None
-        self._reg = None
-        self._cru = None
-        self._fifo_len_cached = None
         self._hw_reg = None
         self._hw_reg_unavailable = False
         self._reg_backend = False
@@ -1681,14 +757,30 @@ class SPI:
         self._released_platform_driver = ""
         self._released_platform_driver_path = ""
 
+        id, positional_pins = _collect_positional_values(id, args)
+        positional_pins, positional_baudrate = _split_trailing_int(positional_pins)
+        if positional_baudrate is not None:
+            baudrate = positional_baudrate
+        if positional_pins:
+            if len(positional_pins) not in (3, 4):
+                raise ValueError("SPI positional pins must contain clk/sck, cs, and mosi or miso")
+        self.baudrate = int(baudrate)
+
         pin_list = []
-        _append_pin_names(pin_list, pins)
-        for pin in (clk if clk is not None else sck, mosi, miso, cs):
-            _append_pin_names(pin_list, pin)
+        role_hints = []
+        _append_pin_with_role(pin_list, role_hints, pins, None)
+        _append_pin_with_role(pin_list, role_hints, positional_pins, None)
+        for pin, role in (
+            (clk if clk is not None else sck, "clk"),
+            (mosi, "mosi"),
+            (miso, "miso"),
+            (cs, "cs"),
+        ):
+            _append_pin_with_role(pin_list, role_hints, pin, role)
 
         requested_bus = _parse_bus_id(id, "spi")
         if pin_list:
-            bus, inferred_cs = _infer_spi_from_pins(self._pinmux, pin_list, requested_bus, chip_select)
+            bus, inferred_cs = _infer_spi_from_pins(self._pinmux, pin_list, requested_bus, chip_select, role_hints)
             chip_select = inferred_cs
             self.id = bus
             self.status = self._pinmux.spi(bus, pin_list, chip_select=chip_select, bind_spidev=bind)
@@ -1827,25 +919,6 @@ class SPI:
             self._open_spidev()
         return self
 
-    def _enable_register_clock(self):
-        if self._cru is None:
-            self._cru = Reg("cru")
-        bus = int(self.status.bus)
-        if bus == 0:
-            _cru_hiword_update(self._cru, 0x1A000 + 0x300, 12, 2, 0)
-            _cru_ungate(self._cru, 0x1A000 + 0x800 + 0x04, (1 << 2) | (1 << 3) | (1 << 4))
-        elif bus == 1:
-            _cru_hiword_update(self._cru, 0x12000 + 0x300 + 0x18, 3, 2, 0)
-            _cru_ungate(self._cru, 0x12000 + 0x800 + 0x0C, (1 << 6) | (1 << 7))
-
-    def _ensure_legacy_reg(self):
-        if self._reg is not None:
-            return
-        self._reg = Reg(f"spi{self.status.bus}")
-        self._enable_register_clock()
-        self._fifo_len_cached = None
-        self._fifo_len_cached = self._fifo_len()
-
     def write(self, data):
         if self._fd is None and self._reg_backend:
             with self._lock:
@@ -1854,21 +927,13 @@ class SPI:
             raise RuntimeError(f"{self.path} is not open; use backend='reg' or bind=True for SPI.write()")
         return os.write(self._fd, bytes(data))
 
-    def _fifo_len(self):
-        if self._fifo_len_cached is not None:
-            return self._fifo_len_cached
-        try:
-            version = self._reg.read32(0x48)
-        except Exception:
-            return 64
-        return 64 if version in (0x05EC0002, 0x00110002) else 32
-
     def _transfer_reg_fast(self, tx_data, rx_len=0, *, tx_only=False):
         if self._hw_reg_unavailable:
             return None
         try:
             if self._hw_reg is None:
-                self._hw_reg = HW(required=False)
+                _try_load_hw_accel("SPI")
+                self._hw_reg = HW(required=False, autoload=False)
             if not self._hw_reg.available():
                 self._hw_reg_unavailable = True
                 return None
@@ -1904,100 +969,19 @@ class SPI:
         fast = self._transfer_reg_fast(tx_data, rx_len, tx_only=tx_only)
         if fast is not None:
             return fast
-
-        self._ensure_legacy_reg()
-        CTRL0 = 0x00
-        CTRL1 = 0x04
-        SSIENR = 0x08
-        SER = 0x0C
-        BAUDR = 0x10
-        TXFTLR = 0x14
-        RXFTLR = 0x18
-        TXFLR = 0x1C
-        RXFLR = 0x20
-        SR = 0x24
-        IMR = 0x2C
-        ICR = 0x38
-        DMACR = 0x3C
-        TXDR = 0x400
-        RXDR = 0x800
-
-        SR_BUSY = 1 << 0
-        XFM_TR = 0 << 18
-        XFM_TO = 1 << 18
-        CR0_BASE = 0x1 | (1 << 10) | (1 << 11) | (1 << 13)
-        mode = ((1 if self.phase else 0) | (2 if self.polarity else 0)) << 6
-        xfm = XFM_TO if tx_only and rx_len == 0 else XFM_TR
-
-        div = max(2, (self.source_clock_hz + self.baudrate - 1) // self.baudrate)
-        if div & 1:
-            div += 1
-        fifo = self._fifo_len()
-
-        total_frames = len(tx_data) if tx_only else max(len(tx_data), rx_len)
-        if not tx_only and len(tx_data) < total_frames:
-            tx_data += bytes([self.dummy]) * (total_frames - len(tx_data))
-
-        received = bytearray()
-        written = 0
-        for start in range(0, total_frames, 0xFFFF):
-            chunk = tx_data[start : start + 0xFFFF]
-            count = len(chunk)
-            if count == 0:
-                continue
-            self._reg.write32(SSIENR, 0)
-            self._reg.write32(IMR, 0)
-            self._reg.write32(ICR, 0xFFFFFFFF)
-            self._reg.write32(DMACR, 0)
-            self._reg.write32(CTRL0, CR0_BASE | mode | xfm)
-            self._reg.write32(CTRL1, count - 1)
-            self._reg.write32(TXFTLR, max(1, fifo // 2))
-            self._reg.write32(RXFTLR, 0)
-            self._reg.write32(BAUDR, div)
-            self._reg.write32(SER, 1 << self.status.chip_select)
-            self._reg.write32(SSIENR, 1)
-            tx_pos = 0
-            rx_target = 0 if tx_only else count
-            rx_pos = 0
-            idle_guard = 0
-            while tx_pos < count or rx_pos < rx_target:
-                progressed = False
-                level = self._reg.read32(TXFLR)
-                if tx_pos < count and level < fifo:
-                    writable = min(fifo - level, count - tx_pos)
-                    self._reg.write8_repeat(TXDR, chunk[tx_pos : tx_pos + writable])
-                    tx_pos += writable
-                    written += writable
-                    progressed = True
-
-                if rx_pos < rx_target:
-                    readable = min(self._reg.read32(RXFLR), rx_target - rx_pos)
-                    if readable:
-                        values = self._reg.read8_repeat(RXDR, readable)
-                        remaining = max(0, rx_len - len(received))
-                        if remaining:
-                            received.extend(values[:remaining])
-                    rx_pos += readable
-                    progressed = progressed or readable > 0
-
-                if progressed:
-                    idle_guard = 0
-                else:
-                    idle_guard += 1
-                    if idle_guard > 5_000_000:
-                        self._reg.write32(SSIENR, 0)
-                        self._reg.write32(SER, 0)
-                        raise TimeoutError("register SPI transfer timed out")
-            idle_guard = 0
-            while self._reg.read32(SR) & SR_BUSY:
-                idle_guard += 1
-                if idle_guard > 5_000_000:
-                    self._reg.write32(SSIENR, 0)
-                    self._reg.write32(SER, 0)
-                    raise TimeoutError("register SPI transfer did not become idle")
-            self._reg.write32(SSIENR, 0)
-            self._reg.write32(SER, 0)
-        return written if tx_only else bytes(received[:rx_len])
+        mode = (1 if self.phase else 0) | (2 if self.polarity else 0)
+        return _spi_reg_pio_transfer_native(
+            int(self.status.bus),
+            int(self.status.chip_select),
+            tx_data,
+            rx_len,
+            tx_only=tx_only,
+            speed_hz=int(self.baudrate),
+            source_clock_hz=int(self.source_clock_hz),
+            mode=mode,
+            bits_per_word=int(self.bits),
+            dummy=self.dummy,
+        )
 
     def read(self, nbytes, write=0xFF):
         if self._fd is None and self._reg_backend:
@@ -2059,7 +1043,7 @@ class SPI:
         return self.read(nbytes, write=write)
 
     def display(self, **kwargs):
-        kwargs.setdefault("spi_bus", self.path)
+        kwargs.setdefault("spi", self)
         kwargs.setdefault("backend", "reg" if self._reg_backend else "auto")
         kwargs.setdefault("speed_hz", self.baudrate)
         return DisplaySPI(**kwargs)
@@ -2075,13 +1059,6 @@ class SPI:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
-        if self._reg is not None:
-            self._reg.close()
-            self._reg = None
-            self._fifo_len_cached = None
-        if self._cru is not None:
-            self._cru.close()
-            self._cru = None
         self._pinmux.close()
 
     close = deinit
@@ -2090,12 +1067,197 @@ class SPI:
         return f"SPI({self.id}, path='{self.path}', group='{self.status.group}')"
 
 
+class DisplaySPI:
+    __doc__ = """SPI display output for ST7789-compatible panels.
+
+    Accepts either an existing SPI object, SPI pins, or the legacy spi_bus
+    argument. Pin based construction is preferred for RV1103/RV1106 because
+    the bus and chip-select can be inferred from the pinmux table.
+    """
+
+    def __init__(
+        self,
+        *args,
+        chip_model="ST7789",
+        spi=None,
+        spi_bus=None,
+        width=240,
+        height=320,
+        rotation_degrees=90,
+        dc_pin="GPIO1_C5",
+        reset_pin="GPIO1_C4",
+        backlight_pin="",
+        speed_hz=50_000_000,
+        baudrate=None,
+        x_offset=0,
+        y_offset=0,
+        bgr=False,
+        invert=False,
+        spi_mode=0,
+        bits_per_word=8,
+        transfer_chunk_size=4096,
+        multi_buffering=True,
+        buffer_count=3,
+        backend="auto",
+        source_clock_hz=200_000_000,
+        clk=None,
+        sck=None,
+        mosi=None,
+        miso=None,
+        cs=None,
+        pins=None,
+        chip_select=None,
+        bind=False,
+        polarity=0,
+        phase=0,
+        dummy=0xFF,
+    ):
+        if _NativeDisplaySPI is None:
+            raise RuntimeError("native DisplaySPI backend is unavailable")
+        if baudrate is not None:
+            speed_hz = baudrate
+
+        values = list(args)
+        if values and not _looks_like_pin(values[0]) and not _looks_like_spi_bus(values[0]):
+            chip_model = values.pop(0)
+        if values and _looks_like_spi_bus(values[0]):
+            spi_bus = values.pop(0)
+        values, positional_speed = _split_trailing_int(values)
+        if positional_speed is not None:
+            speed_hz = positional_speed
+        if values and len(values) not in (3, 4):
+            raise ValueError("DisplaySPI positional SPI pins must contain clk/sck, cs, and mosi or miso")
+
+        self._spi = None
+        self._owns_spi = False
+        self._impl = None
+
+        if spi is not None and values:
+            raise ValueError("DisplaySPI accepts either spi= or positional SPI pins, not both")
+        if spi is not None and any(value is not None for value in (clk, sck, mosi, miso, cs, pins)):
+            raise ValueError("DisplaySPI accepts either spi= or SPI pin arguments, not both")
+
+        if spi is None and (values or pins is not None or any(value is not None for value in (clk, sck, mosi, miso, cs))):
+            spi_args = values
+            self._spi = SPI(
+                *spi_args,
+                baudrate=speed_hz,
+                polarity=polarity,
+                phase=phase,
+                bits=bits_per_word,
+                clk=clk,
+                sck=sck,
+                mosi=mosi,
+                miso=miso,
+                cs=cs,
+                pins=pins,
+                chip_select=chip_select,
+                bind=bind,
+                backend=backend,
+                source_clock_hz=source_clock_hz,
+                dummy=dummy,
+            )
+            self._owns_spi = True
+        elif spi is not None:
+            self._spi = spi
+
+        if self._spi is not None:
+            spi_bus = getattr(self._spi, "path", spi_bus)
+            speed_hz = int(getattr(self._spi, "baudrate", speed_hz))
+            source_clock_hz = int(getattr(self._spi, "source_clock_hz", source_clock_hz))
+            if backend == "auto" and getattr(self._spi, "_reg_backend", False):
+                backend = "reg"
+
+        spi_bus = _normalize_spi_bus(spi_bus) or "/dev/spidev0.0"
+        dc_pin = _pin_name(dc_pin) if dc_pin else ""
+        reset_pin = _pin_name(reset_pin) if reset_pin else ""
+        backlight_pin = _pin_name(backlight_pin) if backlight_pin else ""
+
+        try:
+            if _backend_name(backend) in ("auto", "reg", "register", "direct"):
+                _try_load_hw_accel("DisplaySPI")
+            self._impl = _NativeDisplaySPI(
+                chip_model=chip_model,
+                spi_bus=spi_bus,
+                width=width,
+                height=height,
+                rotation_degrees=rotation_degrees,
+                dc_pin=dc_pin,
+                reset_pin=reset_pin,
+                backlight_pin=backlight_pin,
+                speed_hz=speed_hz,
+                x_offset=x_offset,
+                y_offset=y_offset,
+                bgr=bgr,
+                invert=invert,
+                spi_mode=spi_mode,
+                bits_per_word=bits_per_word,
+                transfer_chunk_size=transfer_chunk_size,
+                multi_buffering=multi_buffering,
+                buffer_count=buffer_count,
+                backend=backend,
+                source_clock_hz=source_clock_hz,
+            )
+        except Exception:
+            if self._owns_spi and self._spi is not None:
+                self._spi.deinit()
+                self._spi = None
+                self._owns_spi = False
+            raise
+
+    def __getattr__(self, name):
+        impl = self.__dict__.get("_impl")
+        if impl is None:
+            raise AttributeError(name)
+        return getattr(impl, name)
+
+    def display(self, frame):
+        return self._impl.display(frame)
+
+    def release(self):
+        impl = self._impl
+        self._impl = None
+        try:
+            if impl is not None:
+                release = getattr(impl, "release", None)
+                if release is not None:
+                    release()
+                else:
+                    close = getattr(impl, "close", None)
+                    if close is not None:
+                        close()
+        finally:
+            if self._owns_spi and self._spi is not None:
+                self._spi.deinit()
+                self._spi = None
+                self._owns_spi = False
+
+    close = release
+    deinit = release
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def __del__(self):
+        try:
+            self.release()
+        except Exception:
+            pass
+
+    def __repr__(self):
+        return f"DisplaySPI(spi={self._spi!r})"
+
+
 class UART:
     def __init__(
         self,
         id=None,
+        *args,
         baudrate=115200,
-        *,
         tx=None,
         rx=None,
         rts=None,
@@ -2126,14 +1288,26 @@ class UART:
         self._reg = None
         self._cru = None
 
+        id, positional_pins = _collect_positional_values(id, args)
+        positional_pins, positional_baudrate = _split_trailing_int(positional_pins)
+        if positional_baudrate is not None:
+            baudrate = positional_baudrate
+        if positional_pins:
+            if len(positional_pins) > 4:
+                raise ValueError("UART positional pins must include up to four UART pins")
+
+        self.baudrate = int(baudrate)
+
         pin_list = []
-        _append_pin_names(pin_list, pins)
-        for pin in (tx, rx, rts, cts):
-            _append_pin_names(pin_list, pin)
+        role_hints = []
+        _append_pin_with_role(pin_list, role_hints, pins, None)
+        _append_pin_with_role(pin_list, role_hints, positional_pins, None)
+        for pin, role in ((tx, "tx"), (rx, "rx"), (rts, "rts"), (cts, "cts")):
+            _append_pin_with_role(pin_list, role_hints, pin, role)
 
         requested_bus = _parse_bus_id(id, "uart")
         if pin_list:
-            bus = _infer_uart_from_pins(self._pinmux, pin_list, requested_bus)
+            bus = _infer_uart_from_pins(self._pinmux, pin_list, requested_bus, role_hints)
             self.id = bus
             self.status = self._pinmux.uart(bus, pin_list, bind_driver=bind)
         elif requested_bus is not None:
@@ -2295,28 +1469,7 @@ class UART:
         return os.write(self._fd, bytes(data))
 
     def _write_reg(self, data):
-        UART_THR = 0x00
-        UART_LSR = 0x14
-        UART_TFL = 0x80
-        LSR_THRE = 1 << 5
-        FIFO_DEPTH = 64
-        payload = bytes(data)
-        written = 0
-        deadline = time.monotonic() + max(0.01, float(self.timeout) if self.timeout else 1.0)
-        while written < len(payload):
-            level = min(FIFO_DEPTH, int(self._reg.read32(UART_TFL)))
-            space = max(0, FIFO_DEPTH - level)
-            if space == 0 and (self._reg.read32(UART_LSR) & LSR_THRE):
-                space = FIFO_DEPTH
-            if space == 0:
-                if time.monotonic() > deadline:
-                    raise TimeoutError("register UART TX FIFO did not drain")
-                continue
-            count = min(space, len(payload) - written)
-            self._reg.write8_repeat(UART_THR, payload[written : written + count])
-            written += count
-            deadline = time.monotonic() + max(0.01, float(self.timeout) if self.timeout else 1.0)
-        return written
+        return _uart_reg_write_native(int(self.status.bus), bytes(data), float(self.timeout))
 
     def read(self, nbytes=1):
         if self._fd is None and self._reg is not None:
@@ -2330,24 +1483,7 @@ class UART:
             return b""
 
     def _read_reg(self, nbytes=1):
-        UART_RBR = 0x00
-        UART_LSR = 0x14
-        UART_RFL = 0x84
-        LSR_DR = 1 << 0
-        out = bytearray()
-        target = int(nbytes)
-        deadline = time.monotonic() + max(0.0, float(self.timeout))
-        while len(out) < target:
-            level = self._reg.read32(UART_RFL)
-            if level == 0 and (self._reg.read32(UART_LSR) & LSR_DR):
-                level = 1
-            if level:
-                count = min(level, target - len(out))
-                out += self._reg.read8_repeat(UART_RBR, count)
-                continue
-            if self.timeout == 0 or time.monotonic() >= deadline:
-                break
-        return bytes(out)
+        return _uart_reg_read_native(int(self.status.bus), int(nbytes), float(self.timeout))
 
     def readinto(self, buf):
         data = self.read(len(buf))
@@ -2363,7 +1499,7 @@ class UART:
     def any(self):
         if self._fd is None and self._reg is not None:
             with self._lock:
-                return int(self._reg.read32(0x84))
+                return _uart_reg_any_native(int(self.status.bus))
         if self._fd is None:
             return 0
         try:
@@ -2402,7 +1538,7 @@ class I2C:
     def __init__(
         self,
         id=None,
-        *,
+        *args,
         scl=None,
         sda=None,
         pins=None,
@@ -2425,14 +1561,25 @@ class I2C:
         self._cru = None
         self._gicd = None
 
+        id, positional_pins = _collect_positional_values(id, args)
+        positional_pins, positional_freq = _split_trailing_int(positional_pins)
+        if positional_freq is not None:
+            freq = positional_freq
+            self.freq_hz = freq
+        if positional_pins:
+            if len(positional_pins) != 2:
+                raise ValueError("I2C positional pins must be (scl, sda)")
+
         pin_list = []
-        _append_pin_names(pin_list, pins)
-        for pin in (scl, sda):
-            _append_pin_names(pin_list, pin)
+        role_hints = []
+        _append_pin_with_role(pin_list, role_hints, pins, None)
+        _append_pin_with_role(pin_list, role_hints, positional_pins, None)
+        for pin, role in ((scl, "scl"), (sda, "sda")):
+            _append_pin_with_role(pin_list, role_hints, pin, role)
 
         requested_bus = _parse_bus_id(id, "i2c")
         if pin_list:
-            bus = _infer_i2c_from_pins(self._pinmux, pin_list, requested_bus)
+            bus = _infer_i2c_from_pins(self._pinmux, pin_list, requested_bus, role_hints)
             self.id = bus
             self.status = self._pinmux.i2c(bus, pin_list, bind_driver=bind)
         elif requested_bus is not None:
@@ -2643,46 +1790,13 @@ class I2C:
                 self._restore_kernel_irq(irq_token)
 
     def _writeto_reg_unmasked(self, addr, buf):
-        REG_CON = 0x00
-        REG_MTXCNT = 0x10
-        REG_IEN = 0x18
-        REG_IPD = 0x1C
-        REG_CON1 = 0x228
-        TXBUFFER_BASE = 0x100
-        REG_CON_EN = 1 << 0
-        REG_CON_MOD_TX = 0 << 1
-        REG_CON_START = 1 << 3
-        REG_CON_STOP = 1 << 4
-        REG_CON_ACTACK = 1 << 6
-        INT_MBTF = 1 << 2
-        INT_STOP = 1 << 5
-        INT_NAKRCV = 1 << 6
-
-        data = bytes(buf)
-        total = 0
-        starts = range(0, len(data), 31) if data else (0,)
-        for start in starts:
-            chunk = data[start : start + 31] if data else b""
-            payload = bytes([(int(addr) & 0x7F) << 1]) + chunk
-            self._reg.write32(REG_CON, self._i2c_tuning)
-            self._reg.write32(REG_IEN, 0)
-            self._reg.write32(REG_IPD, 0xFF)
-            self._reg.write32(REG_CON1, 0)
-            try:
-                self._write_i2c_words(TXBUFFER_BASE, payload)
-                self._reg.write32(REG_IEN, INT_MBTF | INT_NAKRCV)
-                self._start_i2c_reg(REG_CON_MOD_TX)
-                self._reg.write32(REG_MTXCNT, len(payload))
-                self._wait_i2c(INT_MBTF)
-                self._stop_i2c_reg(REG_CON_MOD_TX)
-            except Exception:
-                self._stop_i2c_reg(REG_CON_MOD_TX, raise_on_timeout=False)
-                raise
-            finally:
-                self._reg.write32(REG_IEN, 0)
-                self._reg.write32(REG_CON, self._i2c_tuning)
-            total += len(chunk)
-        return total
+        return _i2c_reg_writeto_native(
+            int(self.status.bus),
+            int(addr),
+            bytes(buf),
+            int(self._i2c_tuning),
+            float(self.timeout),
+        )
 
     def _readfrom_reg(self, addr, nbytes, memaddr_bytes=b""):
         with self._lock:
@@ -2693,54 +1807,14 @@ class I2C:
                 self._restore_kernel_irq(irq_token)
 
     def _readfrom_reg_unmasked(self, addr, nbytes, memaddr_bytes=b""):
-        REG_CON = 0x00
-        REG_MRXADDR = 0x08
-        REG_MRXRADDR = 0x0C
-        REG_MRXCNT = 0x14
-        REG_IEN = 0x18
-        REG_IPD = 0x1C
-        REG_CON1 = 0x228
-        RXBUFFER_BASE = 0x200
-        REG_CON_MOD_REGISTER_TX_ID = 1
-        INT_MBRF = 1 << 3
-        INT_NAKRCV = 1 << 6
-        MRXADDR_VALID0 = 1 << 24
-
-        remaining = int(nbytes)
-        out = bytearray()
-        first = True
-        while remaining > 0:
-            count = min(32, remaining)
-            raddr = 0
-            if first:
-                for index, value in enumerate(bytes(memaddr_bytes)[:4]):
-                    raddr |= int(value) << (8 * index)
-                    raddr |= 1 << (24 + index)
-            self._reg.write32(REG_CON, self._i2c_tuning)
-            self._reg.write32(REG_IEN, 0)
-            self._reg.write32(REG_IPD, 0xFF)
-            self._reg.write32(REG_CON1, 0)
-            slave_addr = (int(addr) & 0x7F) << 1
-            if not memaddr_bytes or not first:
-                slave_addr |= 1
-            self._reg.write32(REG_MRXADDR, slave_addr | MRXADDR_VALID0)
-            self._reg.write32(REG_MRXRADDR, raddr)
-            try:
-                self._reg.write32(REG_IEN, INT_MBRF | INT_NAKRCV)
-                self._start_i2c_reg(REG_CON_MOD_REGISTER_TX_ID, lastack=True)
-                self._reg.write32(REG_MRXCNT, count)
-                self._wait_i2c(INT_MBRF)
-                out += self._read_i2c_words(RXBUFFER_BASE, count)
-                self._stop_i2c_reg(REG_CON_MOD_REGISTER_TX_ID, lastack=True)
-            except Exception:
-                self._stop_i2c_reg(REG_CON_MOD_REGISTER_TX_ID, lastack=True, raise_on_timeout=False)
-                raise
-            finally:
-                self._reg.write32(REG_IEN, 0)
-                self._reg.write32(REG_CON, self._i2c_tuning)
-            remaining -= count
-            first = False
-        return bytes(out)
+        return _i2c_reg_readfrom_native(
+            int(self.status.bus),
+            int(addr),
+            int(nbytes),
+            bytes(memaddr_bytes),
+            int(self._i2c_tuning),
+            float(self.timeout),
+        )
 
     def writeto(self, addr, buf, stop=True):
         del stop
@@ -2870,7 +1944,7 @@ class PWM:
     def __init__(
         self,
         id=None,
-        *,
+        *args,
         pin=None,
         freq=1000,
         duty=0,
@@ -2886,6 +1960,16 @@ class PWM:
         self.backend = _backend_name(backend)
         self.source_clock_hz = int(source_clock_hz)
         self._pinmux = PinMux()
+        id, positional_values = _collect_positional_values(id, args)
+        positional_values, positional_freq = _split_trailing_int(positional_values)
+        if positional_freq is not None:
+            freq = positional_freq
+            self._freq = int(freq)
+        if positional_values:
+            if len(positional_values) != 1:
+                raise ValueError("PWM positional form is PWM(pin), PWM(pin, freq), or PWM(channel, pin, freq)")
+            if pin is None:
+                pin = positional_values[0]
         pin_arg = _pin_name(pin) if pin is not None else None
         pins = [] if pin_arg is None else [pin_arg]
 
@@ -3077,4 +2161,3 @@ Register = Reg
 
 
 __all__ = [n for n in globals() if not n.startswith("_")]
-
