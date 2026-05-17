@@ -36,6 +36,39 @@ void bind_core_types(py::module_& m) {
         .def("__repr__", [](const QRCode &q) {
             return "<QRCode payload='" + q.payload + "'>";
         });
+
+    py::class_<AprilTagDetection>(m, "AprilTagDetection")
+        .def_readonly("family", &AprilTagDetection::family)
+        .def_readonly("id", &AprilTagDetection::id)
+        .def_readonly("hamming", &AprilTagDetection::hamming)
+        .def_readonly("decision_margin", &AprilTagDetection::decision_margin)
+        .def_readonly("cx", &AprilTagDetection::cx)
+        .def_readonly("cy", &AprilTagDetection::cy)
+        .def_property_readonly("center", [](const AprilTagDetection& tag) {
+            return std::make_tuple(tag.cx, tag.cy);
+        })
+        .def_readonly("corners", &AprilTagDetection::corners)
+        .def_readonly("homography", &AprilTagDetection::homography)
+        .def_readonly("has_pose", &AprilTagDetection::has_pose)
+        .def_readonly("pose_error", &AprilTagDetection::pose_error)
+        .def_readonly("pose_R", &AprilTagDetection::pose_R)
+        .def_readonly("pose_t", &AprilTagDetection::pose_t)
+        .def_property_readonly("translation", [](const AprilTagDetection& tag) {
+            return std::make_tuple(tag.tx, tag.ty, tag.tz);
+        })
+        .def_readonly("tx", &AprilTagDetection::tx)
+        .def_readonly("ty", &AprilTagDetection::ty)
+        .def_readonly("tz", &AprilTagDetection::tz)
+        .def_readonly("distance", &AprilTagDetection::distance)
+        .def_readonly("roll", &AprilTagDetection::roll)
+        .def_readonly("pitch", &AprilTagDetection::pitch)
+        .def_readonly("yaw", &AprilTagDetection::yaw)
+        .def_property_readonly("euler_deg", [](const AprilTagDetection& tag) {
+            return std::make_tuple(tag.roll, tag.pitch, tag.yaw);
+        })
+        .def("__repr__", [](const AprilTagDetection& tag) {
+            return "<AprilTagDetection family='" + tag.family + "' id=" + std::to_string(tag.id) + ">";
+        });
 }
 
 
@@ -382,6 +415,24 @@ void bind_image_buffer(py::module_& m) {
 	        .def("find_qrcodes", &ImageBuffer::find_qrcodes, py::call_guard<py::gil_scoped_release>(),
 	             "Finds and decodes QR codes in the image. The image is automatically converted to grayscale if needed.")
 
+	        .def("find_apriltags", &ImageBuffer::find_apriltags,
+                 "family"_a = "tag36h11",
+                 "threads"_a = 1,
+                 "decimate"_a = 2.0,
+                 "sigma"_a = 0.0,
+                 "refine"_a = true,
+                 "sharpen"_a = 0.25,
+                 "hamming"_a = 0,
+                 "size"_a = 0.0,
+                 "fx"_a = 0.0,
+                 "fy"_a = 0.0,
+                 "cx"_a = 0.0,
+                 "cy"_a = 0.0,
+                 "pose"_a = "none",
+                 "iters"_a = 50,
+                 py::call_guard<py::gil_scoped_release>(),
+	             "Finds AprilTag markers. pose can be 'none', 'fast', or 'full'. Use size/fx/fy/cx/cy for pose.")
+
 		.def("find_squares", &ImageBuffer::find_squares,
              "roi"_a = std::make_tuple(0,0,0,0),
              "threshold_val"_a,
@@ -507,4 +558,3 @@ Returns:
                  "Blends an RGBA image onto this image using its alpha channel. This is a CPU operation.")
         .def("__repr__", [](const ImageBuffer &buf) { return "<ImageBuffer " + std::to_string(buf.width) + "x" + std::to_string(buf.height) + ", format " + (py::cast(buf).attr("format").cast<std::string>()) + (buf.is_zero_copy() ? " zero-copy>" : ">"); });
 }
-

@@ -6,6 +6,7 @@ Collected on: 2026-03-13
 
 - Apache-2.0: `licenses/Apache-2.0.txt`
 - LGPL-2.1 reference text: `licenses/LGPL-2.1.txt`
+- AprilTag BSD-2-Clause: local `3rdparty/apriltag/LICENSE`
 - media-server MIT: local `3rdparty/media-server/LICENSE`
 - quirc ISC: local `3rdparty/quirc/LICENSE`
 - pybind11 BSD-3: local `3rdparty/pybind11/LICENSE` (source text mirrored from `licenses/BSD-3-Clause-pybind11.txt`)

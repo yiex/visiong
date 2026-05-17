@@ -19,6 +19,7 @@ This repository keeps only files that are either:
 - `src/npu/internal/tracking/`
 - `src/modules/internal/gui_nuklear_config.h`
 - `src/modules/internal/gui_nuklear_style.*`
+- `3rdparty/apriltag/`
 - `3rdparty/quirc/`
 - `3rdparty/media-server/` subsets listed in `CMakeLists.txt`
 - `3rdparty/pybind11/`, `3rdparty/stb/`, `3rdparty/nuklear/`
@@ -36,6 +37,7 @@ These replace earlier SDK-derived helper/source snapshots:
 ## Compliance-critical retained metadata
 
 - `3rdparty/media-server/LICENSE`
+- `3rdparty/apriltag/LICENSE`
 - `3rdparty/quirc/LICENSE`
 - `3rdparty/pybind11/LICENSE`
 - `3rdparty/stb/LICENSE`

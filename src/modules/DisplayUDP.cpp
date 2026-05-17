@@ -12,8 +12,15 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#if defined(__linux__)
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netdb.h>
+#endif
 #include <mutex>
+#include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
@@ -36,15 +43,133 @@ struct DisplayUDP::Impl {
 
 namespace {
 
+constexpr const char* kDefaultUdpTargetIp = "172.32.0.100";
+
 bool init_sys_if_needed() {
     return visiong_init_sys_if_needed();
+}
+
+#if defined(__linux__)
+struct IfAddrsHolder {
+    struct ifaddrs* ptr = nullptr;
+    ~IfAddrsHolder() {
+        if (ptr) {
+            freeifaddrs(ptr);
+        }
+    }
+};
+#endif
+
+bool starts_with_172_32_0(const std::string& ip) {
+    return ip.rfind("172.32.0.", 0) == 0;
+}
+
+bool is_usable_ipv4_target(const std::string& ip) {
+    if (ip.empty() || ip == "0.0.0.0" || ip == "255.255.255.255") {
+        return false;
+    }
+    if (ip.rfind("127.", 0) == 0) {
+        return false;
+    }
+    sockaddr_in addr{};
+    return inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) == 1;
+}
+
+std::string first_token(const char* value) {
+    if (!value) {
+        return {};
+    }
+    std::istringstream iss(value);
+    std::string token;
+    iss >> token;
+    return token;
+}
+
+std::string read_env_ipv4(const char* env_name, std::string* source_out) {
+    const std::string candidate = first_token(std::getenv(env_name));
+    if (!is_usable_ipv4_target(candidate)) {
+        return {};
+    }
+    if (source_out) {
+        *source_out = std::string(env_name) + "=" + candidate;
+    }
+    return candidate;
+}
+
+std::string read_ssh_client_ip(std::string* source_out) {
+    const char* env_names[] = {
+        "VISIONG_DISPLAYUDP_IP",
+        "VIGIDE_DISPLAYUDP_IP",
+        "SSH_CLIENT",
+        "SSH_CONNECTION",
+    };
+    for (const char* env_name : env_names) {
+        std::string source;
+        const std::string ip = read_env_ipv4(env_name, &source);
+        if (!ip.empty()) {
+            if (source_out) {
+                *source_out = source;
+            }
+            return ip;
+        }
+    }
+    return {};
+}
+
+std::string derive_udp_target_ip(const std::string& requested_ip) {
+    if (!requested_ip.empty()) {
+        return requested_ip;
+    }
+
+    const std::string ssh_client_ip = read_ssh_client_ip(nullptr);
+    if (!ssh_client_ip.empty()) {
+        return ssh_client_ip;
+    }
+
+#if defined(__linux__)
+    IfAddrsHolder ifaddr_holder;
+    if (getifaddrs(&ifaddr_holder.ptr) == 0 && ifaddr_holder.ptr) {
+        for (struct ifaddrs* ifa = ifaddr_holder.ptr; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name || std::strcmp(ifa->ifa_name, "usb0") != 0) {
+                continue;
+            }
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
+                continue;
+            }
+            if (!(ifa->ifa_flags & IFF_UP)) {
+                continue;
+            }
+
+            char host[NI_MAXHOST] = {0};
+            if (getnameinfo(ifa->ifa_addr,
+                            sizeof(struct sockaddr_in),
+                            host,
+                            NI_MAXHOST,
+                            nullptr,
+                            0,
+                            NI_NUMERICHOST) == 0 && host[0] != '\0') {
+                const std::string usb0_ip(host);
+                if (starts_with_172_32_0(usb0_ip)) {
+                    return kDefaultUdpTargetIp;
+                }
+
+                const size_t last_dot = usb0_ip.rfind('.');
+                if (last_dot != std::string::npos) {
+                    return usb0_ip.substr(0, last_dot + 1) + "2";
+                }
+                break;
+            }
+        }
+    }
+#endif
+
+    return kDefaultUdpTargetIp;
 }
 
 } // namespace
 
 DisplayUDP::DisplayUDP(const std::string& udp_ip, int udp_port, int jpeg_quality)
     : m_impl(std::make_unique<Impl>()) {
-    m_impl->udp_ip_address = udp_ip;
     m_impl->udp_port_number = udp_port;
     m_impl->jpeg_quality = visiong::venc::clamp_quality(jpeg_quality);
     std::memset(&m_impl->server_address, 0, sizeof(m_impl->server_address));
@@ -62,7 +187,7 @@ bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality)
     if (state.initialized.load(std::memory_order_relaxed)) {
         release();
     }
-    state.udp_ip_address = udp_ip;
+    state.udp_ip_address = derive_udp_target_ip(udp_ip);
     state.udp_port_number = udp_port;
     state.jpeg_quality = visiong::venc::clamp_quality(jpeg_quality);
     {
@@ -93,7 +218,7 @@ bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality)
 
     state.initialized.store(true, std::memory_order_relaxed);
     VISIONG_LOG_INFO("DisplayUDP",
-                     "Initialized, ready to stream to " << udp_ip << ":" << udp_port
+                     "Initialized, ready to stream to " << state.udp_ip_address << ":" << udp_port
                                                          << " with JPEG quality " << state.jpeg_quality);
     return true;
 }

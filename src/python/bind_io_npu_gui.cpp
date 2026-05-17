@@ -49,14 +49,14 @@ ASRResult infer_asr_from_numpy(ASR& self,
 
 void bind_io_devices(py::module_& m) {
     py::class_<DisplayUDP>(m, "DisplayUDP")
-        .def(py::init<const std::string&, int, int>(), "udp_ip"_a = "172.32.0.100", "udp_port"_a = 8000, "jpeg_quality"_a = 75,
-             "Creates DisplayUDP. Optionally call init(ip_address, port, jpeg_quality) to set or change target.\n"
+        .def(py::init<const std::string&, int, int>(), "udp_ip"_a = "", "udp_port"_a = 8000, "jpeg_quality"_a = 75,
+             "Creates DisplayUDP. If udp_ip is empty, the SSH/VigIDE client IP is used first, then usb0 is auto-detected, then 172.32.0.100 is used as fallback.\n"
              "DisplayUDP keeps its own JPEG session lock to reduce VENC re-init: color priority is BGR > RGB > YUV > other, and size only grows while smaller frames are black-padded to the locked canvas.\n"
              "创建 DisplayUDP。也可之后调用 init(ip_address, port, jpeg_quality) 修改目标。\n"
              "DisplayUDP 为了减少 VENC 反复重初始化，会维持自己的 JPEG 会话锁：颜色优先级为 BGR > RGB > YUV > 其他；尺寸只会向更大方向扩张，较小帧会补黑边到锁定画布。")
-        .def("init", &DisplayUDP::init, "ip_address"_a, "port"_a, "jpeg_quality"_a = 75,
+        .def("init", &DisplayUDP::init, "ip_address"_a = "", "port"_a = 8000, "jpeg_quality"_a = 75,
              py::call_guard<py::gil_scoped_release>(),
-             "Initializes or re-initializes the UDP sender (target IP, port, JPEG quality 1-100).")
+             "Initializes or re-initializes the UDP sender (target IP, port, JPEG quality 1-100). Empty ip_address uses SSH/VigIDE client IP first, then usb0/default fallback.")
         .def("display", &DisplayUDP::display, "img_buf"_a,
              py::call_guard<py::gil_scoped_release>(),
              "Encodes the ImageBuffer to JPEG (VENC) and sends it via UDP to the configured address. The DisplayUDP-local lock may convert color format and black-pad smaller frames before encoding.\n"
@@ -95,7 +95,8 @@ void bind_io_devices(py::module_& m) {
         "original_width"_a = py::none(),
         "original_height"_a = py::none(),
         "rotation_degrees"_a = py::none(),
-        "Initializes the touch controller. This constructor performs all necessary hardware setup.\n"
+        "Initializes the touch controller. Use chip_model='fake' to receive VigIDE fake touch UDP events.\n"
+        "For fake touch, i2c_bus may be left as the default or set to 'port=8765,bind=0.0.0.0'.\n"
         "Raises a RuntimeError if initialization fails (e.g., device not found).\n\n"
         "By default, initializes for an FT6336U on /dev/i2c-3, configured for a\n"
         "240x320 screen rotated 270 degrees to a 320x240 landscape view.")

@@ -17,6 +17,7 @@ This is a practical release checklist for VisionG. It is not legal advice.
 - Project-owned replacements now cover DMA allocation helpers and IVE memory/image helpers.
 - SDK-derived sample source trees and vendor header snapshots are not kept in the repository.
 - In-tree third-party source directories carry local license texts next to the retained code.
+- The in-tree AprilTag detector is the official AprilRobotics C implementation under BSD-2-Clause.
 - SDK, RKNN, librga, and IVE headers are resolved from `--deps-root` or `--sdk-root`.
 
 ## 3) High-risk redistribution areas

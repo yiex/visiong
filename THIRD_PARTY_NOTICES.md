@@ -10,6 +10,7 @@ Third-party components keep their original licenses and are not relicensed by LG
 
 | Component | Path | License | Notes |
 |---|---|---|---|
+| AprilTag | `3rdparty/apriltag/` | BSD-2-Clause | Fiducial marker detection, official AprilRobotics C implementation v3.4.5 |
 | pybind11 | `3rdparty/pybind11/` | BSD-3-Clause | Python binding layer, local `LICENSE` included |
 | media-server | `3rdparty/media-server/` | MIT | RTSP/FLV/MOV helpers |
 | OpenCV prebuilt subset | `3rdparty/opencv/` | Apache-2.0 plus bundled third-party notices | Repository-local RV1106 OpenCV subset for CI/binary packaging; not part of the public source archive |

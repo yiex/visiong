@@ -8,20 +8,38 @@
 #if VISIONG_WITH_IVE
 #include "visiong/modules/IVE.h"
 #endif
+#include "apriltag.h"
+#include "apriltag_pose.h"
 #include "quirc.h"
+#include "tag16h5.h"
+#include "tag25h9.h"
+#include "tag36h10.h"
+#include "tag36h11.h"
+#include "tagCircle21h7.h"
+#include "tagStandard41h12.h"
+
+#include "common/image_u8.h"
+#include "common/matd.h"
+#include "common/zarray.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__ARM_NEON)
@@ -43,6 +61,265 @@ static cv::Mat image_buffer_to_gray_mat_view(const ImageBuffer& img_buf) {
     }
     return view;
 }
+
+namespace {
+
+struct AprilTagFamilyDeleter {
+    void operator()(apriltag_family_t* family) const {
+        if (!family) {
+            return;
+        }
+
+        const std::string name = family->name ? family->name : "";
+        if (name == "tag16h5") {
+            tag16h5_destroy(family);
+        } else if (name == "tag25h9") {
+            tag25h9_destroy(family);
+        } else if (name == "tag36h10") {
+            tag36h10_destroy(family);
+        } else if (name == "tag36h11") {
+            tag36h11_destroy(family);
+        } else if (name == "tagCircle21h7") {
+            tagCircle21h7_destroy(family);
+        } else if (name == "tagStandard41h12") {
+            tagStandard41h12_destroy(family);
+        } else {
+            std::free(family);
+        }
+    }
+};
+
+struct AprilTagDetectorDeleter {
+    void operator()(apriltag_detector_t* detector) const {
+        if (detector) {
+            apriltag_detector_destroy(detector);
+        }
+    }
+};
+
+struct AprilTagDetectionsDeleter {
+    void operator()(zarray_t* detections) const {
+        if (detections) {
+            apriltag_detections_destroy(detections);
+        }
+    }
+};
+
+using AprilTagFamilyPtr = std::unique_ptr<apriltag_family_t, AprilTagFamilyDeleter>;
+using AprilTagDetectorPtr = std::unique_ptr<apriltag_detector_t, AprilTagDetectorDeleter>;
+using AprilTagDetectionsPtr = std::unique_ptr<zarray_t, AprilTagDetectionsDeleter>;
+
+AprilTagFamilyPtr create_apriltag_family(const std::string& family) {
+    if (family == "tag16h5") {
+        return AprilTagFamilyPtr(tag16h5_create());
+    }
+    if (family == "tag25h9") {
+        return AprilTagFamilyPtr(tag25h9_create());
+    }
+    if (family == "tag36h10") {
+        return AprilTagFamilyPtr(tag36h10_create());
+    }
+    if (family == "tag36h11") {
+        return AprilTagFamilyPtr(tag36h11_create());
+    }
+    if (family == "tagCircle21h7") {
+        return AprilTagFamilyPtr(tagCircle21h7_create());
+    }
+    if (family == "tagStandard41h12") {
+        return AprilTagFamilyPtr(tagStandard41h12_create());
+    }
+
+    throw std::invalid_argument(
+        "find_apriltags: unsupported family '" + family +
+        "'. Supported families: tag16h5, tag25h9, tag36h10, tag36h11, "
+        "tagCircle21h7, tagStandard41h12.");
+}
+
+struct AprilTagDetectorCache {
+    std::string family_name;
+    int max_hamming = -1;
+    AprilTagFamilyPtr family;
+    AprilTagDetectorPtr detector;
+
+    apriltag_detector_t* get(const std::string& requested_family, int requested_max_hamming) {
+        if (!detector || !family || family_name != requested_family || max_hamming != requested_max_hamming) {
+            reset(requested_family, requested_max_hamming);
+        }
+        return detector.get();
+    }
+
+    void reset(const std::string& requested_family, int requested_max_hamming) {
+        detector.reset();
+        family.reset();
+        family_name.clear();
+        max_hamming = -1;
+
+        AprilTagFamilyPtr new_family = create_apriltag_family(requested_family);
+        if (!new_family) {
+            throw std::runtime_error("find_apriltags: failed to create tag family '" + requested_family + "'.");
+        }
+
+        AprilTagDetectorPtr new_detector(apriltag_detector_create());
+        if (!new_detector) {
+            throw std::runtime_error("find_apriltags: failed to create detector.");
+        }
+
+        apriltag_detector_add_family_bits(new_detector.get(), new_family.get(), requested_max_hamming);
+        family_name = requested_family;
+        max_hamming = requested_max_hamming;
+        family = std::move(new_family);
+        detector = std::move(new_detector);
+    }
+};
+
+struct AprilTagPoseValues {
+    bool has_pose = false;
+    double error = 0.0;
+    std::vector<double> R;
+    std::vector<double> t;
+    double tx = 0.0;
+    double ty = 0.0;
+    double tz = 0.0;
+    double distance = 0.0;
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+};
+
+enum class AprilTagPoseMode {
+    None,
+    Fast,
+    Full,
+};
+
+std::string to_lower_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+AprilTagPoseMode parse_apriltag_pose_mode(const std::string& pose_mode) {
+    const std::string mode = to_lower_ascii(pose_mode);
+    if (mode == "none" || mode == "off" || mode == "false" || mode == "0") {
+        return AprilTagPoseMode::None;
+    }
+    if (mode == "fast") {
+        return AprilTagPoseMode::Fast;
+    }
+    if (mode == "full") {
+        return AprilTagPoseMode::Full;
+    }
+    throw std::invalid_argument("find_apriltags: pose must be 'none', 'fast', or 'full'.");
+}
+
+std::array<double, 3> rotation_matrix_to_euler_xyz(const std::vector<double>& r) {
+    if (r.size() != 9) {
+        return {0.0, 0.0, 0.0};
+    }
+
+    const double sy = std::sqrt(r[0] * r[0] + r[3] * r[3]);
+    const bool singular = sy < 1.0e-6;
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+
+    if (!singular) {
+        roll = std::atan2(r[7], r[8]);
+        pitch = std::atan2(-r[6], sy);
+        yaw = std::atan2(r[3], r[0]);
+    } else {
+        roll = std::atan2(-r[5], r[4]);
+        pitch = std::atan2(-r[6], sy);
+        yaw = 0.0;
+    }
+
+    constexpr double kRadToDeg = 180.0 / 3.1415926535897932384626433832795;
+    return {roll * kRadToDeg, pitch * kRadToDeg, yaw * kRadToDeg};
+}
+
+void copy_apriltag_pose_values(const apriltag_pose_t& pose, double error, AprilTagPoseValues& values) {
+    values.error = error;
+    if (!(pose.R && pose.R->nrows == 3 && pose.R->ncols == 3 && pose.t && pose.t->nrows == 3 && pose.t->ncols == 1)) {
+        return;
+    }
+
+    values.has_pose = true;
+    values.R.reserve(9);
+    for (unsigned int row = 0; row < 3; ++row) {
+        for (unsigned int col = 0; col < 3; ++col) {
+            values.R.push_back(matd_get(pose.R, row, col));
+        }
+    }
+
+    values.t.reserve(3);
+    for (unsigned int row = 0; row < 3; ++row) {
+        values.t.push_back(matd_get(pose.t, row, 0));
+    }
+
+    values.tx = values.t[0];
+    values.ty = values.t[1];
+    values.tz = values.t[2];
+    values.distance = std::sqrt(values.tx * values.tx + values.ty * values.ty + values.tz * values.tz);
+
+    const auto euler = rotation_matrix_to_euler_xyz(values.R);
+    values.roll = euler[0];
+    values.pitch = euler[1];
+    values.yaw = euler[2];
+}
+
+AprilTagPoseValues estimate_apriltag_pose_values(
+    apriltag_detection_t* detection,
+    double tag_size,
+    double fx,
+    double fy,
+    double camera_cx,
+    double camera_cy,
+    AprilTagPoseMode pose_mode,
+    int pose_iters) {
+    AprilTagPoseValues values;
+    if (!detection || pose_mode == AprilTagPoseMode::None || tag_size <= 0.0 || fx <= 0.0 || fy <= 0.0) {
+        return values;
+    }
+
+    apriltag_detection_info_t info{};
+    info.det = detection;
+    info.tagsize = tag_size;
+    info.fx = fx;
+    info.fy = fy;
+    info.cx = camera_cx;
+    info.cy = camera_cy;
+
+    apriltag_pose_t pose{};
+    if (pose_mode == AprilTagPoseMode::Fast) {
+        estimate_pose_for_tag_homography(&info, &pose);
+        copy_apriltag_pose_values(pose, 0.0, values);
+    } else {
+        double err1 = 0.0;
+        double err2 = 0.0;
+        apriltag_pose_t pose1{};
+        apriltag_pose_t pose2{};
+        estimate_tag_pose_orthogonal_iteration(&info, &err1, &pose1, &err2, &pose2, pose_iters);
+
+        if (err1 <= err2) {
+            copy_apriltag_pose_values(pose1, err1, values);
+            matd_destroy(pose2.R);
+            matd_destroy(pose2.t);
+        } else {
+            copy_apriltag_pose_values(pose2, err2, values);
+            matd_destroy(pose1.R);
+            matd_destroy(pose1.t);
+        }
+        pose.R = err1 <= err2 ? pose1.R : pose2.R;
+        pose.t = err1 <= err2 ? pose1.t : pose2.t;
+    }
+
+    matd_destroy(pose.R);
+    matd_destroy(pose.t);
+    return values;
+}
+
+}  // namespace
 
 static void threshold_hsv_pipeline(uint8_t* mask, const uint8_t* hsv_data, int count,
     uint8_t h_min, uint8_t h_max, 
@@ -651,6 +928,149 @@ std::vector<QRCode> ImageBuffer::find_qrcodes() const {
     return results;
 }
 
+std::vector<AprilTagDetection> ImageBuffer::find_apriltags(
+    const std::string& family,
+    int nthreads,
+    double quad_decimate,
+    double quad_sigma,
+    bool refine_edges_value,
+    double decode_sharpening,
+    int max_hamming,
+    double tag_size,
+    double fx,
+    double fy,
+    double camera_cx,
+    double camera_cy,
+    const std::string& pose_mode,
+    int pose_iters) const {
+    std::vector<AprilTagDetection> results;
+    if (!is_valid()) {
+        return results;
+    }
+    if (nthreads < 1) {
+        throw std::invalid_argument("find_apriltags: nthreads must be >= 1.");
+    }
+    if (quad_decimate < 1.0) {
+        throw std::invalid_argument("find_apriltags: quad_decimate must be >= 1.0.");
+    }
+    if (max_hamming < 0 || max_hamming > 2) {
+        throw std::invalid_argument("find_apriltags: max_hamming must be 0, 1, or 2.");
+    }
+    if (pose_iters < 0) {
+        throw std::invalid_argument("find_apriltags: pose_iters must be >= 0.");
+    }
+    const AprilTagPoseMode parsed_pose_mode = parse_apriltag_pose_mode(pose_mode);
+    const bool pose_requested = parsed_pose_mode != AprilTagPoseMode::None;
+    if (pose_requested && (tag_size <= 0.0 || fx <= 0.0 || fy <= 0.0)) {
+        throw std::invalid_argument("find_apriltags: pose estimation requires tag_size, fx, and fy to be > 0.");
+    }
+
+    const size_t yuv420_required_size =
+        (this->w_stride > 0 && this->h_stride > 0)
+            ? static_cast<size_t>(this->w_stride) * static_cast<size_t>(this->h_stride) * 3 / 2
+            : 0;
+    const bool can_read_y_plane_directly =
+        visiong::is_yuv420sp_format(this->format) && this->get_size() >= yuv420_required_size;
+
+    const ImageBuffer* gray_source = this;
+    if (this->format != visiong::kGray8Format && !can_read_y_plane_directly) {
+        gray_source = &this->get_gray_version();
+    }
+
+    const ImageBuffer& gray_img = *gray_source;
+    if (!gray_img.is_valid()) {
+        return results;
+    }
+    visiong::bufstate::prepare_cpu_read(gray_img);
+    const uint8_t* gray_data = static_cast<const uint8_t*>(gray_img.get_data());
+    if (gray_data == nullptr) {
+        return results;
+    }
+
+    thread_local AprilTagDetectorCache detector_cache;
+    apriltag_detector_t* detector = detector_cache.get(family, max_hamming);
+
+    detector->nthreads = nthreads;
+    detector->quad_decimate = static_cast<float>(quad_decimate);
+    detector->quad_sigma = static_cast<float>(quad_sigma);
+    detector->refine_edges = refine_edges_value;
+    detector->decode_sharpening = decode_sharpening;
+
+    image_u8_t input = {
+        gray_img.width,
+        gray_img.height,
+        gray_img.w_stride,
+        const_cast<uint8_t*>(gray_data)
+    };
+
+    AprilTagDetectionsPtr detections(apriltag_detector_detect(detector, &input));
+    if (!detections) {
+        return results;
+    }
+
+    const int count = zarray_size(detections.get());
+    results.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        apriltag_detection_t* detection = nullptr;
+        zarray_get(detections.get(), i, &detection);
+        if (!detection) {
+            continue;
+        }
+
+        Polygon corners;
+        corners.reserve(4);
+        for (int j = 0; j < 4; ++j) {
+            corners.emplace_back(
+                static_cast<int>(std::lround(detection->p[j][0])),
+                static_cast<int>(std::lround(detection->p[j][1])));
+        }
+
+        std::vector<double> homography;
+        if (detection->H && detection->H->nrows == 3 && detection->H->ncols == 3) {
+            homography.reserve(9);
+            for (unsigned int row = 0; row < 3; ++row) {
+                for (unsigned int col = 0; col < 3; ++col) {
+                    homography.push_back(matd_get(detection->H, row, col));
+                }
+            }
+        }
+
+        const AprilTagPoseValues pose = estimate_apriltag_pose_values(
+            detection,
+            tag_size,
+            fx,
+            fy,
+            camera_cx,
+            camera_cy,
+            pose_requested ? parsed_pose_mode : AprilTagPoseMode::None,
+            pose_iters);
+
+        const char* family_name = detection->family && detection->family->name ? detection->family->name : family.c_str();
+        results.emplace_back(
+            std::string(family_name),
+            detection->id,
+            detection->hamming,
+            detection->decision_margin,
+            detection->c[0],
+            detection->c[1],
+            corners,
+            homography,
+            pose.has_pose,
+            pose.error,
+            pose.R,
+            pose.t,
+            pose.tx,
+            pose.ty,
+            pose.tz,
+            pose.distance,
+            pose.roll,
+            pose.pitch,
+            pose.yaw);
+    }
+
+    return results;
+}
+
 // find_squares implementation.
 // find_squares 的实现。
 
@@ -923,4 +1343,3 @@ std::vector<ImageBuffer::Square> ImageBuffer::find_squares(
 
     return final_squares_list;
 }
-

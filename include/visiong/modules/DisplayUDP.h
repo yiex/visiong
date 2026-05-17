@@ -11,13 +11,13 @@ class ImageBuffer;
 
 class DisplayUDP {
   public:
-    DisplayUDP(const std::string& udp_ip = "172.32.0.100", int udp_port = 8000, int jpeg_quality = 75);
+    DisplayUDP(const std::string& udp_ip = "", int udp_port = 8000, int jpeg_quality = 75);
     ~DisplayUDP();
 
     DisplayUDP(const DisplayUDP&) = delete;
     DisplayUDP& operator=(const DisplayUDP&) = delete;
 
-    bool init(const std::string& udp_ip, int udp_port, int jpeg_quality = 75);
+    bool init(const std::string& udp_ip = "", int udp_port = 8000, int jpeg_quality = 75);
     bool display(const ImageBuffer& img_buf);
     void release();
     bool is_initialized() const;

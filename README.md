@@ -249,6 +249,7 @@ mkdir -p dist
 - 感谢 `opencv-mobile` 在嵌入式 OpenCV 裁切、打包方面的工作
 - 感谢 `pybind11` 提供高质量的 Python 绑定基础设施
 - 感谢 `media-server` 提供 RTSP / FLV / MOV 相关基础组件
+- 感谢 `AprilTag` / AprilRobotics 提供 AprilTag 标记检测能力
 - 感谢 `quirc` 提供二维码识别能力
 - 感谢 `stb` 提供轻量的图像读写工具
 - 感谢 `Nuklear` 提供即时模式 GUI 基础
@@ -530,6 +531,7 @@ I want to sincerely thank all authors, maintainers, and projects that have helpe
 - `opencv-mobile` for its work on trimming and packaging OpenCV for embedded environments
 - `pybind11` for high-quality Python binding infrastructure
 - `media-server` for RTSP / FLV / MOV related building blocks
+- `AprilTag` / AprilRobotics for AprilTag fiducial marker detection
 - `quirc` for QR code recognition capability
 - `stb` for lightweight image reading and writing utilities
 - `Nuklear` for the immediate-mode GUI foundation

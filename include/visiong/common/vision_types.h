@@ -97,5 +97,65 @@ struct QRCode {
         : corners(corner_points), payload(payload_text) {}
 };
 
-#endif  // VISIONG_COMMON_VISION_TYPES_H
+struct AprilTagDetection {
+    std::string family;
+    int id;
+    int hamming;
+    float decision_margin;
+    double cx;
+    double cy;
+    Polygon corners;
+    std::vector<double> homography;
+    bool has_pose;
+    double pose_error;
+    std::vector<double> pose_R;
+    std::vector<double> pose_t;
+    double tx;
+    double ty;
+    double tz;
+    double distance;
+    double roll;
+    double pitch;
+    double yaw;
 
+    AprilTagDetection(const std::string& family_name,
+                      int tag_id,
+                      int hamming_value,
+                      float margin,
+                      double center_x,
+                      double center_y,
+                      const Polygon& corner_points,
+                      const std::vector<double>& homography_values,
+                      bool has_pose_value,
+                      double pose_error_value,
+                      const std::vector<double>& pose_R_values,
+                      const std::vector<double>& pose_t_values,
+                      double tx_value,
+                      double ty_value,
+                      double tz_value,
+                      double distance_value,
+                      double roll_value,
+                      double pitch_value,
+                      double yaw_value)
+        : family(family_name),
+          id(tag_id),
+          hamming(hamming_value),
+          decision_margin(margin),
+          cx(center_x),
+          cy(center_y),
+          corners(corner_points),
+          homography(homography_values),
+          has_pose(has_pose_value),
+          pose_error(pose_error_value),
+          pose_R(pose_R_values),
+          pose_t(pose_t_values),
+          tx(tx_value),
+          ty(ty_value),
+          tz(tz_value),
+          distance(distance_value),
+          roll(roll_value),
+          pitch(pitch_value),
+          yaw(yaw_value) {}
+};
+
+#endif  // VISIONG_COMMON_VISION_TYPES_H

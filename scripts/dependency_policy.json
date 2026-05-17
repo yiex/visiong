@@ -4,6 +4,14 @@
   "public_release_mode": "source-and-dynamic-binaries",
   "in_tree_third_party": [
     {
+      "name": "AprilTag",
+      "path": "3rdparty/apriltag",
+      "license": "BSD-2-Clause",
+      "requires_local_license": true,
+      "public_source_release": true,
+      "notes": "Official AprilRobotics C fiducial marker detector v3.4.5"
+    },
+    {
       "name": "media-server",
       "path": "3rdparty/media-server",
       "license": "MIT",

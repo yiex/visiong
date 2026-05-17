@@ -20,7 +20,7 @@ Default public release posture:
 | Class | Example paths | Public source release | Public binary release | Default handling |
 |---|---|---|---|---|
 | VisionG project-owned code | `src/`, `include/visiong/`, `scripts/`, `docs/` | Yes | Yes, through `visiong_cpp.zip` and `visiong_python.zip` | Keep in repository |
-| In-tree third-party source | `3rdparty/media-server/`, `3rdparty/pybind11/`, `3rdparty/quirc/`, `3rdparty/stb/`, `3rdparty/nuklear/` | Yes | Usually yes for linked outputs, subject to their original licenses and notices | Keep in repository with local `LICENSE` |
+| In-tree third-party source | `3rdparty/apriltag/`, `3rdparty/media-server/`, `3rdparty/pybind11/`, `3rdparty/quirc/`, `3rdparty/stb/`, `3rdparty/nuklear/` | Yes | Usually yes for linked outputs, subject to their original licenses and notices | Keep in repository with local `LICENSE` |
 | In-tree prebuilt OpenCV subset | `3rdparty/opencv/` | No, excluded from the public source archive | Yes, as part of the prepared VisionG binary packaging flow | Keep in repository for CI and binary packaging |
 | Project-owned replacements for SDK helper code | `src/common/internal/dma_alloc.cpp`, `src/modules/internal/ive_memory.cpp` | Yes | Yes | Keep in repository |
 | Rockchip/Luckfox SDK headers and runtime libraries | `_stage/vendor/rockchip/include/`, `_stage/lib/` | No | Review separately file-by-file | Fetch/stage only |

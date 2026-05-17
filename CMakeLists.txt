@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.1.1" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.1.2" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -535,6 +535,7 @@ foreach(_src IN LISTS VISIONG_CORE_SRCS VISIONG_SELECTED_MODULE_SRCS VISIONG_C_C
     endif()
 endforeach()
 
+add_subdirectory(3rdparty/apriltag)
 add_subdirectory(3rdparty/quirc)
 
 set(VISIONG_RUNTIME_SRCS
@@ -593,6 +594,7 @@ set(VISIONG_COMMON_INCLUDE_DIRS
     ${VISIONG_VENDOR_INCLUDE_DIR}/rkaiq/iq_parser
     ${VISIONG_VENDOR_INCLUDE_DIR}/rkaiq/iq_parser_v2
     3rdparty/pybind11
+    3rdparty/apriltag
     3rdparty/quirc
     3rdparty/stb
     3rdparty/nuklear
@@ -669,6 +671,7 @@ endforeach()
 
 set(VISIONG_RUNTIME_LINK_LIBS
     ${OpenCV_LIBS}
+    apriltag
     quirc
     ${VISIONG_LIB_RGA}
     ${VISIONG_LIB_MPP}
@@ -693,7 +696,7 @@ set_source_files_properties(${VISIONG_PYTHON_BINDING_SRCS} PROPERTIES COMPILE_OP
 add_library(visiong_runtime_objects OBJECT ${VISIONG_RUNTIME_SRCS})
 visiong_apply_common_compile_settings(visiong_runtime_objects)
 target_compile_options(visiong_runtime_objects PRIVATE -fvisibility=default)
-target_link_libraries(visiong_runtime_objects PUBLIC quirc)
+target_link_libraries(visiong_runtime_objects PUBLIC apriltag quirc)
 target_include_directories(visiong_runtime_objects
     PUBLIC
         ${VISIONG_PUBLIC_INCLUDE_DIRS}

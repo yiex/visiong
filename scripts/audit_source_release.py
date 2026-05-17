@@ -30,6 +30,7 @@ ALLOWED_TOP_LEVEL = {
 }
 REQUIRED_FILES = {
     ".github/workflows/release.yml",
+    "3rdparty/apriltag/LICENSE",
     "3rdparty/media-server/LICENSE",
     "3rdparty/nuklear/LICENSE",
     "3rdparty/pybind11/LICENSE",

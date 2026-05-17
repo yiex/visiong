@@ -63,6 +63,24 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+class FakeTouch : public TouchDevice {
+public:
+    explicit FakeTouch(const std::string& endpoint_spec = "");
+    ~FakeTouch() override;
+
+    FakeTouch(const FakeTouch&) = delete;
+    FakeTouch& operator=(const FakeTouch&) = delete;
+
+    void release() override;
+    bool is_pressed() override;
+    std::vector<TouchPoint> get_touch_points() override;
+    void configure_geometry(int original_width, int original_height, int rotation_degrees) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 std::unique_ptr<TouchDevice> create_touch_device(const std::string& chip_model,
                                                  const std::string& i2c_bus_path);
 

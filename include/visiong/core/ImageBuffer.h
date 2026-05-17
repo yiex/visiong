@@ -141,6 +141,21 @@ public:
         int max_sides,
         int accuracy) const;
     std::vector<QRCode> find_qrcodes() const;
+    std::vector<AprilTagDetection> find_apriltags(
+        const std::string& family = "tag36h11",
+        int nthreads = 1,
+        double quad_decimate = 2.0,
+        double quad_sigma = 0.0,
+        bool refine_edges = true,
+        double decode_sharpening = 0.25,
+        int max_hamming = 0,
+        double tag_size = 0.0,
+        double fx = 0.0,
+        double fy = 0.0,
+        double camera_cx = 0.0,
+        double camera_cy = 0.0,
+        const std::string& pose_mode = "none",
+        int pose_iters = 50) const;
 
     using Square = Polygon;
     std::vector<Square> find_squares(
@@ -239,4 +254,3 @@ public:
 };
 
 #endif  // VISIONG_CORE_IMAGEBUFFER_H
-
