@@ -5,11 +5,11 @@
 #include "visiong/core/ImageBuffer.h"
 #include "visiong/core/BufferStateMachine.h"
 #include "visiong/core/RgaHelper.h"
+#include "core/internal/logger.h"
 #include "core/internal/rga_utils.h"
 #include "im2d.hpp"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core.hpp>
-#include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -20,8 +20,8 @@
 #include "quirc.h"
 #include <chrono>
 #include <random>
-#include "visiong/modules/VencManager.h"
-#include "visiong/modules/VencRecorder.h"
+#include "visiong/modules/MppEncoderManager.h"
+#include "visiong/modules/MppRecorder.h"
 #include <fstream>
 #include "stb_image_write.h"
 #include "visiong/common/build_config.h"
@@ -30,7 +30,7 @@
 #endif
 #include "visiong/common/pixel_format.h"
 #include "common/internal/string_utils.h"
-#include "modules/internal/venc_utils.h"
+#include "modules/internal/mpp_utils.h"
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -120,38 +120,41 @@ void ImageBuffer::save_hsv_bin(const std::string& filepath) const {
     ofs.write(reinterpret_cast<const char*>(hsv_buf.get_data()), hsv_buf.get_size());
     ofs.close();
 
-    std::cout << "[visiong] HSV raw data saved to: " << filepath
-              << (used_ive_path ? " (IVE path)" : " (OpenCV fallback)") << std::endl;
+    VISIONG_LOG_DEBUG("ImageBuffer", "HSV raw data saved to: " << filepath
+                       << (used_ive_path ? " (IVE path)" : " (OpenCV fallback)"));
 }
 
-void ImageBuffer::save_venc_jpg(const std::string& filepath, int quality) const {
-    if (!is_valid()) throw std::runtime_error("save_venc_jpg: Invalid ImageBuffer");
-    const int normalized_quality = visiong::venc::clamp_quality(quality);
+void ImageBuffer::save_mpp_jpg(const std::string& filepath, int quality) const {
+    if (!is_valid()) throw std::runtime_error("save_mpp_jpg: Invalid ImageBuffer");
+    if (filepath.empty()) throw std::runtime_error("save_mpp_jpg: filepath must not be empty.");
+    const int normalized_quality = visiong::mpp::clamp_quality(quality);
 
-    auto& venc = VencManager::getInstance();
-    VencManager::ScopedUser user(venc);
+    auto& mpp = MppEncoderManager::getInstance();
+    MppEncoderManager::ScopedUser user(mpp);
 
-    if (venc.isInitialized()) {
-        if (venc.getWidth() != this->width ||
-            venc.getHeight() != this->height || 
-            venc.getFormat() != this->format) {
-            
+    if (mpp.isInitialized() && !mpp.canReconfigure()) {
+        if (mpp.getWidth() != this->width ||
+            mpp.getHeight() != this->height ||
+            mpp.getFormat() != this->format ||
+            mpp.getCodec() != MppCodec::JPEG ||
+            mpp.getQuality() != normalized_quality) {
             std::stringstream err;
-            err << "VENC Conflict: Hardware is busy with " 
-                << venc.getWidth() << "x" << venc.getHeight() << " [" << PixelFormatToString(venc.getFormat()) << "]. "
+            err << "MPP Conflict: Hardware is busy with "
+                << mpp.getWidth() << "x" << mpp.getHeight() << " [" << PixelFormatToString(mpp.getFormat()) << "]. "
                 << "Cannot save image with " << this->width << "x" << this->height << " [" << PixelFormatToString(this->format) << "].";
             throw std::runtime_error(err.str());
         }
-    } 
-    std::vector<unsigned char> jpg_data = venc.encodeToJpeg(*this, normalized_quality);
+    }
+    std::vector<unsigned char> jpg_data = mpp.encodeToJpeg(*this, normalized_quality);
 
     if (jpg_data.empty()) {
-        throw std::runtime_error("save_venc_jpg: VENC hardware encoding failed (returned empty data).");
+        throw std::runtime_error("save_mpp_jpg: MPP hardware encoding failed (returned empty data).");
     }
 
     std::ofstream ofs(filepath, std::ios::binary);
-    if (!ofs) throw std::runtime_error("save_venc_jpg: Failed to open file for writing: " + filepath);
+    if (!ofs) throw std::runtime_error("save_mpp_jpg: Failed to open file for writing: " + filepath);
     ofs.write(reinterpret_cast<const char*>(jpg_data.data()), jpg_data.size());
+    if (!ofs) throw std::runtime_error("save_mpp_jpg: Failed to write file: " + filepath);
     ofs.close();
 }
 
@@ -174,11 +177,22 @@ SaveContainer resolve_container(const std::string& container, const std::string&
     }
     if (c == "mp4") return SaveContainer::MP4;
     if (c == "annexb" || c == "raw" || c == "h264" || c == "h265") return SaveContainer::ANNEXB;
-    throw std::invalid_argument("save_venc_h26x: container must be 'auto', 'annexb', or 'mp4'.");
+    throw std::invalid_argument("save_mpp_h26x: container must be 'auto', 'annexb', or 'mp4'.");
 }
 
-VencRecorder::Codec to_recorder_codec(VencCodec codec) {
-    return (codec == VencCodec::H265) ? VencRecorder::Codec::H265 : VencRecorder::Codec::H264;
+MppCodec resolve_video_codec(const std::string& codec, const std::string& filepath) {
+    const std::string c = visiong::to_lower_copy(codec);
+    if (c.empty() || c == "auto") {
+        const std::string ext = get_ext_lower(filepath);
+        return (ext == "h265" || ext == "hevc") ? MppCodec::H265 : MppCodec::H264;
+    }
+    if (c == "h264" || c == "avc") return MppCodec::H264;
+    if (c == "h265" || c == "hevc") return MppCodec::H265;
+    throw std::invalid_argument("save_video: codec must be 'auto', 'h264', or 'h265'.");
+}
+
+MppRecorder::Codec to_recorder_codec(MppCodec codec) {
+    return (codec == MppCodec::H265) ? MppRecorder::Codec::H265 : MppRecorder::Codec::H264;
 }
 
 bool is_file_empty(const std::string& filepath) {
@@ -188,91 +202,206 @@ bool is_file_empty(const std::string& filepath) {
     return size <= 0;
 }
 
-void save_venc_video_impl(const ImageBuffer& img, const std::string& filepath, VencCodec codec,
+void replace_all(std::string& text, const std::string& from, const std::string& to) {
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+std::string user_friendly_encoder_error(std::string detail) {
+    const std::vector<std::pair<std::string, std::string>> replacements = {
+        {"save_mpp_h26x", "save_video"},
+        {"save_mpp_jpg", "save_jpg"},
+        {"MppRecorder", "video recorder"},
+        {"MPP", "video encoder"},
+        {"mpp", "video encoder"},
+    };
+    for (const auto& pair : replacements) {
+        replace_all(detail, pair.first, pair.second);
+    }
+    return detail;
+}
+
+bool starts_with(const std::string& text, const std::string& prefix) {
+    return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool is_file_io_error(const std::string& detail) {
+    return detail.find("Failed to open file") != std::string::npos ||
+           detail.find("Failed to write file") != std::string::npos ||
+           detail.find("filepath must not be empty") != std::string::npos;
+}
+
+bool should_fallback_to_software_jpeg(const std::exception& e) {
+    const std::string detail = e.what();
+    return !is_file_io_error(detail);
+}
+
+std::string user_jpeg_error(const std::exception& e) {
+    std::string detail = user_friendly_encoder_error(e.what());
+    if (starts_with(detail, "save_jpg:")) {
+        return detail;
+    }
+    return "save_jpg: failed to save JPEG. " + detail;
+}
+
+std::string user_video_error(const std::exception& e) {
+    std::string detail = user_friendly_encoder_error(e.what());
+    if (starts_with(detail, "save_video:")) {
+        return detail;
+    }
+    return "save_video: failed to save video frame. " + detail;
+}
+
+void save_jpeg_software(const ImageBuffer& img, const std::string& filepath, int quality) {
+    const ImageBuffer& bgr_img = img.get_bgr_version();
+    if (!bgr_img.is_valid()) {
+        throw std::runtime_error("save_jpg: Failed to get a BGR version of the image for saving.");
+    }
+
+    std::vector<unsigned char> rgb_data;
+    convert_bgr_to_compact_rgb(bgr_img, rgb_data);
+
+    if (stbi_write_jpg(filepath.c_str(), bgr_img.width, bgr_img.height, 3, rgb_data.data(), quality) == 0) {
+        throw std::runtime_error("save_jpg: Failed to write JPEG file.");
+    }
+}
+
+void save_bmp_software(const ImageBuffer& img, const std::string& filepath) {
+    const ImageBuffer& bgr_img = img.get_bgr_version();
+    if (!bgr_img.is_valid()) {
+        throw std::runtime_error("save: Failed to get a BGR version of the image for saving.");
+    }
+
+    std::vector<unsigned char> rgb_data;
+    convert_bgr_to_compact_rgb(bgr_img, rgb_data);
+
+    if (stbi_write_bmp(filepath.c_str(), bgr_img.width, bgr_img.height, 3, rgb_data.data()) == 0) {
+        throw std::runtime_error("save: Failed to write BMP file.");
+    }
+}
+
+void save_mpp_video_impl(const ImageBuffer& img, const std::string& filepath, MppCodec codec,
                           int quality, const std::string& rc_mode, int fps, bool append,
                           const std::string& container, bool mp4_faststart) {
-    if (!img.is_valid()) throw std::runtime_error("save_venc_h26x: Invalid ImageBuffer");
-    if (filepath.empty()) throw std::runtime_error("save_venc_h26x: filepath must not be empty.");
-    const int normalized_quality = visiong::venc::clamp_quality(quality);
-    const int normalized_fps = visiong::venc::clamp_record_fps(fps);
-    const std::string normalized_rc_mode = visiong::venc::normalize_rc_mode(rc_mode);
-    const VencRcMode rc = (normalized_rc_mode == "vbr") ? VencRcMode::VBR : VencRcMode::CBR;
+    if (!img.is_valid()) throw std::runtime_error("save_mpp_h26x: Invalid ImageBuffer");
+    if (filepath.empty()) throw std::runtime_error("save_mpp_h26x: filepath must not be empty.");
+    const int normalized_quality = visiong::mpp::clamp_quality(quality);
+    const int normalized_fps = visiong::mpp::clamp_record_fps(fps);
+    const std::string normalized_rc_mode = visiong::mpp::normalize_rc_mode(rc_mode);
+    const MppRcMode rc = (normalized_rc_mode == "vbr") ? MppRcMode::VBR : MppRcMode::CBR;
 
     const SaveContainer out_container = resolve_container(container, filepath);
     if (out_container == SaveContainer::MP4) {
-        save_venc_mp4_frame(filepath, to_recorder_codec(codec), img, normalized_quality,
+        save_mpp_mp4_frame(filepath, to_recorder_codec(codec), img, normalized_quality,
                             normalized_rc_mode, normalized_fps, mp4_faststart, append);
         return;
     }
 
-    auto& venc = VencManager::getInstance();
-    VencManager::ScopedUser user(venc);
+    auto& mpp = MppEncoderManager::getInstance();
+    MppEncoderManager::ScopedUser user(mpp);
 
-    if (venc.isInitialized()) {
+    if (mpp.isInitialized() && !mpp.canReconfigure()) {
         const bool shape_or_codec_conflict =
-            (venc.getWidth() != img.width || venc.getHeight() != img.height || venc.getFormat() != img.format ||
-             venc.getCodec() != codec);
+            (mpp.getWidth() != img.width || mpp.getHeight() != img.height || mpp.getFormat() != img.format ||
+             mpp.getCodec() != codec);
         const bool encoder_param_conflict =
-            (venc.getQuality() != normalized_quality || venc.getFps() != normalized_fps || venc.getRcMode() != rc);
+            (mpp.getQuality() != normalized_quality || mpp.getFps() != normalized_fps || mpp.getRcMode() != rc);
         if (shape_or_codec_conflict || encoder_param_conflict) {
             std::stringstream err;
-            err << "VENC Conflict: Hardware is busy with "
-                << venc.getWidth() << "x" << venc.getHeight() << " ["
-                << PixelFormatToString(venc.getFormat()) << "] "
-                << (venc.getCodec() == VencCodec::H264 ? "H264" : (venc.getCodec() == VencCodec::H265 ? "H265" : "JPEG"))
-                << " q=" << venc.getQuality()
-                << " fps=" << venc.getFps()
-                << " rc=" << (venc.getRcMode() == VencRcMode::VBR ? "VBR" : "CBR")
+            err << "MPP Conflict: Hardware is busy with "
+                << mpp.getWidth() << "x" << mpp.getHeight() << " ["
+                << PixelFormatToString(mpp.getFormat()) << "] "
+                << (mpp.getCodec() == MppCodec::H264 ? "H264" : (mpp.getCodec() == MppCodec::H265 ? "H265" : "JPEG"))
+                << " q=" << mpp.getQuality()
+                << " fps=" << mpp.getFps()
+                << " rc=" << (mpp.getRcMode() == MppRcMode::VBR ? "VBR" : "CBR")
                 << ". Cannot save video with "
                 << img.width << "x" << img.height << " ["
                 << PixelFormatToString(img.format) << "] "
-                << (codec == VencCodec::H264 ? "H264" : "H265")
+                << (codec == MppCodec::H264 ? "H264" : "H265")
                 << " q=" << normalized_quality
                 << " fps=" << normalized_fps
-                << " rc=" << (rc == VencRcMode::VBR ? "VBR" : "CBR")
+                << " rc=" << (rc == MppRcMode::VBR ? "VBR" : "CBR")
                 << ".";
             throw std::runtime_error(err.str());
         }
     }
 
-    VencEncodedPacket packet;
-    if (!venc.encodeToVideo(img, codec, normalized_quality, packet, normalized_fps, rc)) {
-        throw std::runtime_error("save_venc_h26x: VENC hardware encoding failed.");
+    MppEncodedPacket packet;
+    if (!mpp.encodeToVideo(img, codec, normalized_quality, packet, normalized_fps, rc)) {
+        throw std::runtime_error("save_mpp_h26x: MPP hardware encoding failed.");
     }
     if (packet.data.empty()) {
-        throw std::runtime_error("save_venc_h26x: VENC returned empty data.");
+        throw std::runtime_error("save_mpp_h26x: MPP returned empty data.");
     }
 
     const bool need_prefix = (!append) || is_file_empty(filepath);
     std::ios::openmode mode = std::ios::binary | (append ? std::ios::app : std::ios::trunc);
     std::ofstream ofs(filepath, mode);
-    if (!ofs) throw std::runtime_error("save_venc_h26x: Failed to open file for writing: " + filepath);
+    if (!ofs) throw std::runtime_error("save_mpp_h26x: Failed to open file for writing: " + filepath);
 
     if (need_prefix && !packet.codec_data.empty()) {
         ofs.write(reinterpret_cast<const char*>(packet.codec_data.data()), packet.codec_data.size());
     }
     ofs.write(reinterpret_cast<const char*>(packet.data.data()), packet.data.size());
+    if (!ofs) throw std::runtime_error("save_mpp_h26x: Failed to write file: " + filepath);
     ofs.close();
 }
 } // namespace
 
-void ImageBuffer::save_venc_h264(const std::string& filepath, int quality, const std::string& rc_mode,
+void ImageBuffer::save_mpp_h264(const std::string& filepath, int quality, const std::string& rc_mode,
                                  int fps, bool append, const std::string& container, bool mp4_faststart) const {
-    save_venc_video_impl(*this, filepath, VencCodec::H264, quality, rc_mode, fps, append, container, mp4_faststart);
+    save_mpp_video_impl(*this, filepath, MppCodec::H264, quality, rc_mode, fps, append, container, mp4_faststart);
 }
 
-void ImageBuffer::save_venc_h265(const std::string& filepath, int quality, const std::string& rc_mode,
+void ImageBuffer::save_mpp_h265(const std::string& filepath, int quality, const std::string& rc_mode,
                                  int fps, bool append, const std::string& container, bool mp4_faststart) const {
-    save_venc_video_impl(*this, filepath, VencCodec::H265, quality, rc_mode, fps, append, container, mp4_faststart);
+    save_mpp_video_impl(*this, filepath, MppCodec::H265, quality, rc_mode, fps, append, container, mp4_faststart);
+}
+
+void ImageBuffer::save_jpg(const std::string& filepath, int quality) const {
+    if (!is_valid()) {
+        throw std::runtime_error("save_jpg: Cannot save an invalid ImageBuffer.");
+    }
+    if (filepath.empty()) {
+        throw std::runtime_error("save_jpg: filepath must not be empty.");
+    }
+    const int normalized_quality = visiong::mpp::clamp_quality(quality);
+    try {
+        save_mpp_jpg(filepath, normalized_quality);
+    } catch (const std::exception& e) {
+        if (!should_fallback_to_software_jpeg(e)) {
+            throw std::runtime_error(user_jpeg_error(e));
+        }
+        save_jpeg_software(*this, filepath, normalized_quality);
+    }
+}
+
+void ImageBuffer::save_jpeg(const std::string& filepath, int quality) const {
+    save_jpg(filepath, quality);
+}
+
+void ImageBuffer::save_video(const std::string& filepath, int quality, int fps, bool append,
+                             const std::string& codec) const {
+    try {
+        const MppCodec resolved_codec = resolve_video_codec(codec, filepath);
+        save_mpp_video_impl(*this, filepath, resolved_codec, quality, "cbr", fps, append, "auto", true);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(user_video_error(e));
+    }
 }
 
 void ImageBuffer::save(const std::string& filepath, int quality) const {
     if (!is_valid()) {
         throw std::runtime_error("save: Cannot save an invalid ImageBuffer.");
     }
-    if (quality < 1 || quality > 100) {
-        throw std::invalid_argument("save: JPEG/PNG quality must be between 1 and 100.");
+    if (filepath.empty()) {
+        throw std::runtime_error("save: filepath must not be empty.");
     }
+    const int normalized_quality = visiong::mpp::clamp_quality(quality);
 
     std::string ext;
     size_t dot_pos = filepath.rfind('.');
@@ -282,24 +411,13 @@ void ImageBuffer::save(const std::string& filepath, int quality) const {
                        [](unsigned char c){ return std::tolower(c); });
     }
 
-    if (ext == "jpg" || ext == "jpeg" || ext == "bmp") {
-        const ImageBuffer& bgr_img = this->get_bgr_version();
-        if (!bgr_img.is_valid()) {
-            throw std::runtime_error("save: Failed to get a BGR version of the image for saving.");
-        }
+    if (ext == "jpg" || ext == "jpeg") {
+        save_jpg(filepath, normalized_quality);
+        return;
+    }
 
-        std::vector<unsigned char> rgb_data;
-        convert_bgr_to_compact_rgb(bgr_img, rgb_data);
-
-        if (ext == "jpg" || ext == "jpeg") {
-            if (stbi_write_jpg(filepath.c_str(), bgr_img.width, bgr_img.height, 3, rgb_data.data(), quality) == 0) {
-                throw std::runtime_error("save: Failed to write JPEG file.");
-            }
-        } else { // ext == "bmp"
-            if (stbi_write_bmp(filepath.c_str(), bgr_img.width, bgr_img.height, 3, rgb_data.data()) == 0) {
-                throw std::runtime_error("save: Failed to write BMP file.");
-            }
-        }
+    if (ext == "bmp") {
+        save_bmp_software(*this, filepath);
 
     } else if (ext == "png") {
         ImageBuffer rgba_img_owner;

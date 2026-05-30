@@ -3,16 +3,24 @@
 
 #include "visiong/core/ImageBuffer.h"
 #include "visiong/core/NetUtils.h"
-#include "visiong/modules/VencManager.h"
+#include "visiong/modules/MppEncoderManager.h"
+#include "visiong/core/BufferStateMachine.h"
+#include "visiong/core/RgaHelper.h"
 #include "core/internal/logger.h"
-#include "modules/internal/venc_utils.h"
+#include "core/internal/runtime_init.h"
+#include "modules/internal/mpp_utils.h"
 #include "rtsp_demo.h"
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
+#include <cstdlib>
 #include <fcntl.h>
+#include <map>
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
+#include <memory>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -24,13 +32,35 @@ DisplayRTSP::RcMode normalize_rc_mode(DisplayRTSP::RcMode mode) {
     return mode == DisplayRTSP::RcMode::VBR ? DisplayRTSP::RcMode::VBR : DisplayRTSP::RcMode::CBR;
 }
 
-VencRcMode to_venc_rc_mode(DisplayRTSP::RcMode mode) {
-    return normalize_rc_mode(mode) == DisplayRTSP::RcMode::VBR ? VencRcMode::VBR : VencRcMode::CBR;
+MppRcMode to_mpp_rc_mode(DisplayRTSP::RcMode mode) {
+    return normalize_rc_mode(mode) == DisplayRTSP::RcMode::VBR ? MppRcMode::VBR : MppRcMode::CBR;
 }
 
 std::vector<std::string> get_local_ip_addresses() {
     return visiong::get_local_ipv4_addresses();
 }
+
+struct RtspPortServer {
+    explicit RtspPortServer(int server_port) : port(server_port) {}
+    ~RtspPortServer() { stop(); }
+
+    void start(bool suppress_logs);
+    void stop();
+    void set_suppress_logs(bool suppress);
+    rtsp_session_handle add_session(const std::string& path);
+    void remove_session(rtsp_session_handle session);
+
+    int port = 0;
+    rtsp_demo_handle demo = nullptr;
+    std::atomic<bool> running{false};
+    std::thread event_thread;
+    std::mutex mutex;
+    int ref_count = 0;
+    bool suppress_logs = true;
+};
+
+std::mutex g_rtsp_server_registry_mutex;
+std::map<int, std::weak_ptr<RtspPortServer>> g_rtsp_servers;
 
 int g_null_fd = -1;
 int g_saved_stdout = -1;
@@ -83,6 +113,111 @@ class ScopedLogSilence {
     std::unique_lock<std::mutex> m_lock;
 };
 
+void RtspPortServer::start(bool suppress_logs_requested) {
+    std::lock_guard<std::mutex> lk(mutex);
+    suppress_logs = suppress_logs_requested;
+    if (running.load(std::memory_order_relaxed)) {
+        ++ref_count;
+        return;
+    }
+
+    demo = rtsp_new_demo(port);
+    if (!demo) {
+        throw std::runtime_error("DisplayRTSP: Failed to create RTSP demo.");
+    }
+
+    ref_count = 1;
+    running.store(true, std::memory_order_relaxed);
+    event_thread = std::thread([this]() {
+        while (running.load(std::memory_order_relaxed)) {
+            {
+                std::lock_guard<std::mutex> event_lock(mutex);
+                if (demo) {
+                    ScopedLogSilence silence(suppress_logs);
+                    rtsp_do_event(demo);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+}
+
+void RtspPortServer::stop() {
+    {
+        std::lock_guard<std::mutex> lk(mutex);
+        if (ref_count > 0) {
+            --ref_count;
+            if (ref_count > 0) {
+                return;
+            }
+        }
+        running.store(false, std::memory_order_relaxed);
+    }
+
+    if (event_thread.joinable()) {
+        event_thread.join();
+    }
+
+    std::lock_guard<std::mutex> lk(mutex);
+    if (demo) {
+        rtsp_del_demo(demo);
+        demo = nullptr;
+    }
+    ref_count = 0;
+}
+
+void RtspPortServer::set_suppress_logs(bool suppress) {
+    std::lock_guard<std::mutex> lk(mutex);
+    suppress_logs = suppress;
+}
+
+rtsp_session_handle RtspPortServer::add_session(const std::string& path) {
+    std::lock_guard<std::mutex> lk(mutex);
+    if (!demo) {
+        return nullptr;
+    }
+    return rtsp_new_session(demo, path.c_str());
+}
+
+void RtspPortServer::remove_session(rtsp_session_handle session) {
+    if (!session) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(mutex);
+    rtsp_del_session(session);
+}
+
+std::shared_ptr<RtspPortServer> acquire_rtsp_port_server(int port, bool suppress_logs) {
+    std::shared_ptr<RtspPortServer> server;
+    {
+        std::lock_guard<std::mutex> registry_lock(g_rtsp_server_registry_mutex);
+        auto& weak = g_rtsp_servers[port];
+        server = weak.lock();
+        if (!server) {
+            server = std::make_shared<RtspPortServer>(port);
+            weak = server;
+        }
+    }
+    server->start(suppress_logs);
+    return server;
+}
+
+void release_rtsp_port_server(std::shared_ptr<RtspPortServer>& server) {
+    if (!server) {
+        return;
+    }
+    const int port = server->port;
+    server->stop();
+    server.reset();
+    {
+        std::lock_guard<std::mutex> registry_lock(g_rtsp_server_registry_mutex);
+        auto it = g_rtsp_servers.find(port);
+        if (it != g_rtsp_servers.end() && it->second.expired()) {
+            g_rtsp_servers.erase(it);
+        }
+    }
+}
+
 } // namespace
 
 struct DisplayRTSP::Impl {
@@ -92,32 +227,28 @@ struct DisplayRTSP::Impl {
          int quality,
          int fps,
          int logs,
-         DisplayRTSP::RcMode rc_mode)
+         DisplayRTSP::RcMode rc_mode,
+         int output_width,
+         int output_height,
+         int preferred_mpp_channel)
         : m_port(port),
           m_path(std::move(path)),
           m_codec(codec),
-          m_quality(visiong::venc::clamp_quality(quality)),
+          m_quality(visiong::mpp::clamp_quality(quality)),
           m_rc_mode(static_cast<int>(normalize_rc_mode(rc_mode))),
-          m_demo(nullptr),
           m_session(nullptr),
           m_is_running(false),
           m_video_configured(false),
           m_codec_data_sent(false),
-          m_max_fps(visiong::venc::clamp_non_negative_fps(fps)),
+          m_max_fps(visiong::mpp::clamp_non_negative_fps(fps)),
+          m_output_width(std::max(0, output_width)),
+          m_output_height(std::max(0, output_height)),
+          m_preferred_mpp_channel(preferred_mpp_channel),
+          m_mpp_channel(-1),
           m_has_sent(false),
           m_last_send(std::chrono::steady_clock::now()),
           m_suppress_logs(logs == 0),
           m_client_active(false) {}
-
-    void event_loop() {
-        while (m_is_running.load(std::memory_order_relaxed)) {
-            if (m_demo) {
-                ScopedLogSilence silence(m_suppress_logs.load(std::memory_order_relaxed));
-                rtsp_do_event(m_demo);
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
 
     int m_port;
     std::string m_path;
@@ -125,25 +256,36 @@ struct DisplayRTSP::Impl {
     std::atomic<int> m_quality;
     std::atomic<int> m_rc_mode;
 
-    rtsp_demo_handle m_demo;
+    std::shared_ptr<RtspPortServer> m_server;
     rtsp_session_handle m_session;
 
     std::atomic<bool> m_is_running;
     bool m_video_configured;
     bool m_codec_data_sent;
     std::atomic<int> m_max_fps;
+    std::atomic<int> m_output_width;
+    std::atomic<int> m_output_height;
+    int m_preferred_mpp_channel;
+    int m_mpp_channel;
     bool m_has_sent;
     std::chrono::steady_clock::time_point m_last_send;
     std::atomic<bool> m_suppress_logs;
     bool m_client_active;
-    std::atomic<bool> m_venc_user_acquired{false};
     mutable std::mutex m_state_mutex;
-    std::thread m_event_thread;
 };
 
 DisplayRTSP::DisplayRTSP(int port, const std::string& path, int quality, Codec codec, int fps, int logs,
-                         RcMode rc_mode)
-    : m_impl(std::make_unique<Impl>(port, path, codec, quality, fps, logs, rc_mode)) {}
+                         RcMode rc_mode, int output_width, int output_height, int mpp_channel)
+    : m_impl(std::make_unique<Impl>(port,
+                                    path,
+                                    codec,
+                                    quality,
+                                    fps,
+                                    logs,
+                                    rc_mode,
+                                    output_width,
+                                    output_height,
+                                    mpp_channel)) {}
 
 DisplayRTSP::~DisplayRTSP() {
     stop();
@@ -157,12 +299,13 @@ void DisplayRTSP::start() {
     }
 
     try {
-        state.m_demo = rtsp_new_demo(state.m_port);
-        if (!state.m_demo) {
-            throw std::runtime_error("DisplayRTSP: Failed to create RTSP demo.");
+        state.m_mpp_channel = MppEncoderManager::getInstance().acquireDedicatedChannel(state.m_preferred_mpp_channel);
+        if (state.m_mpp_channel < 0) {
+            throw std::runtime_error("DisplayRTSP: no free MPP channel for this RTSP stream.");
         }
 
-        state.m_session = rtsp_new_session(state.m_demo, state.m_path.c_str());
+        state.m_server = acquire_rtsp_port_server(state.m_port, state.m_suppress_logs.load(std::memory_order_relaxed));
+        state.m_session = state.m_server ? state.m_server->add_session(state.m_path) : nullptr;
         if (!state.m_session) {
             throw std::runtime_error("DisplayRTSP: Failed to create RTSP session.");
         }
@@ -185,21 +328,21 @@ void DisplayRTSP::start() {
             state.m_client_active = false;
         }
 
-        state.m_venc_user_acquired.store(false, std::memory_order_relaxed);
         state.m_is_running.store(true, std::memory_order_relaxed);
-        state.m_event_thread = std::thread([this] { m_impl->event_loop(); });
     } catch (...) {
         state.m_is_running.store(false, std::memory_order_relaxed);
-        if (state.m_event_thread.joinable()) {
-            state.m_event_thread.join();
-        }
         if (state.m_session) {
-            rtsp_del_session(state.m_session);
+            if (state.m_server) {
+                state.m_server->remove_session(state.m_session);
+            } else {
+                rtsp_del_session(state.m_session);
+            }
             state.m_session = nullptr;
         }
-        if (state.m_demo) {
-            rtsp_del_demo(state.m_demo);
-            state.m_demo = nullptr;
+        release_rtsp_port_server(state.m_server);
+        if (state.m_mpp_channel >= 0) {
+            MppEncoderManager::getInstance().releaseDedicatedChannel(state.m_mpp_channel);
+            state.m_mpp_channel = -1;
         }
         {
             std::lock_guard<std::mutex> lk(state.m_state_mutex);
@@ -221,7 +364,14 @@ void DisplayRTSP::start() {
                                          ? "CBR"
                                          : "VBR")
                                  << "  FPS: " << state.m_max_fps.load(std::memory_order_relaxed)
+                                 << "  MPP ch: " << state.m_mpp_channel
                                  << "  Logs: " << (state.m_suppress_logs.load(std::memory_order_relaxed) ? "0" : "1"));
+    if (state.m_output_width.load(std::memory_order_relaxed) > 0 &&
+        state.m_output_height.load(std::memory_order_relaxed) > 0) {
+        VISIONG_LOG_INFO("DisplayRTSP",
+                         "  Output size: " << state.m_output_width.load(std::memory_order_relaxed) << "x"
+                                            << state.m_output_height.load(std::memory_order_relaxed));
+    }
     VISIONG_LOG_INFO("DisplayRTSP", "  Stream URL:");
     auto ips = get_local_ip_addresses();
     if (ips.empty()) {
@@ -237,25 +387,22 @@ void DisplayRTSP::stop() {
     Impl& state = *m_impl;
     if (!state.m_is_running.load(std::memory_order_relaxed) &&
         !state.m_session &&
-        !state.m_demo &&
-        !state.m_event_thread.joinable()) {
+        !state.m_server &&
+        state.m_mpp_channel < 0) {
         return;
     }
 
     state.m_is_running.store(false, std::memory_order_relaxed);
-    if (state.m_event_thread.joinable()) {
-        state.m_event_thread.join();
-    }
 
     {
         std::lock_guard<std::mutex> lk(state.m_state_mutex);
         if (state.m_session) {
-            rtsp_del_session(state.m_session);
+            if (state.m_server) {
+                state.m_server->remove_session(state.m_session);
+            } else {
+                rtsp_del_session(state.m_session);
+            }
             state.m_session = nullptr;
-        }
-        if (state.m_demo) {
-            rtsp_del_demo(state.m_demo);
-            state.m_demo = nullptr;
         }
         state.m_video_configured = false;
         state.m_codec_data_sent = false;
@@ -263,10 +410,11 @@ void DisplayRTSP::stop() {
         state.m_client_active = false;
     }
 
-    if (state.m_venc_user_acquired.exchange(false, std::memory_order_relaxed)) {
-        VencManager::getInstance().releaseUser();
+    release_rtsp_port_server(state.m_server);
+    if (state.m_mpp_channel >= 0) {
+        MppEncoderManager::getInstance().releaseDedicatedChannel(state.m_mpp_channel);
+        state.m_mpp_channel = -1;
     }
-    VencManager::getInstance().releaseVencIfUnused();
     VISIONG_LOG_INFO("DisplayRTSP", "Server stopped.");
 }
 
@@ -276,7 +424,7 @@ bool DisplayRTSP::is_running() const {
 
 void DisplayRTSP::set_fps(int fps) {
     Impl& state = *m_impl;
-    fps = visiong::venc::clamp_non_negative_fps(fps);
+    fps = visiong::mpp::clamp_non_negative_fps(fps);
     state.m_max_fps.store(fps, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(state.m_state_mutex);
     state.m_has_sent = false;
@@ -288,7 +436,7 @@ int DisplayRTSP::get_fps() const {
 }
 
 void DisplayRTSP::set_quality(int quality) {
-    quality = visiong::venc::clamp_quality(quality);
+    quality = visiong::mpp::clamp_quality(quality);
     m_impl->m_quality.store(quality, std::memory_order_relaxed);
 }
 
@@ -305,7 +453,11 @@ DisplayRTSP::RcMode DisplayRTSP::get_rc_mode() const {
 }
 
 void DisplayRTSP::set_suppress_logs(bool enable) {
-    m_impl->m_suppress_logs.store(enable, std::memory_order_relaxed);
+    Impl& state = *m_impl;
+    state.m_suppress_logs.store(enable, std::memory_order_relaxed);
+    if (state.m_server) {
+        state.m_server->set_suppress_logs(enable);
+    }
 }
 
 bool DisplayRTSP::get_suppress_logs() const {
@@ -313,11 +465,34 @@ bool DisplayRTSP::get_suppress_logs() const {
 }
 
 void DisplayRTSP::set_logs(int logs) {
-    m_impl->m_suppress_logs.store(logs == 0, std::memory_order_relaxed);
+    set_suppress_logs(logs == 0);
 }
 
 int DisplayRTSP::get_logs() const {
     return m_impl->m_suppress_logs.load(std::memory_order_relaxed) ? 0 : 1;
+}
+
+void DisplayRTSP::set_output_size(int width, int height) {
+    Impl& state = *m_impl;
+    width = std::max(0, width);
+    height = std::max(0, height);
+    state.m_output_width.store(width, std::memory_order_relaxed);
+    state.m_output_height.store(height, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(state.m_state_mutex);
+    state.m_codec_data_sent = false;
+    state.m_has_sent = false;
+}
+
+int DisplayRTSP::get_output_width() const {
+    return m_impl->m_output_width.load(std::memory_order_relaxed);
+}
+
+int DisplayRTSP::get_output_height() const {
+    return m_impl->m_output_height.load(std::memory_order_relaxed);
+}
+
+int DisplayRTSP::get_mpp_channel() const {
+    return m_impl->m_mpp_channel;
 }
 
 bool DisplayRTSP::display(const ImageBuffer& img) {
@@ -340,17 +515,32 @@ bool DisplayRTSP::display(const ImageBuffer& img) {
         state.m_has_sent = true;
     }
 
-    if (!state.m_venc_user_acquired.exchange(true, std::memory_order_relaxed)) {
-        VencManager::getInstance().acquireUser();
+    const MppCodec mpp_codec = (state.m_codec == Codec::H265) ? MppCodec::H265 : MppCodec::H264;
+    const int quality = state.m_quality.load(std::memory_order_relaxed);
+    const int fps_enc = visiong::mpp::clamp_record_fps(fps);
+    const MppRcMode mpp_rc = to_mpp_rc_mode(static_cast<RcMode>(state.m_rc_mode.load(std::memory_order_relaxed)));
+
+    ImageBuffer resized_img;
+    const ImageBuffer* encode_img = &img;
+    const int output_width = state.m_output_width.load(std::memory_order_relaxed);
+    const int output_height = state.m_output_height.load(std::memory_order_relaxed);
+    const bool needs_resize =
+        output_width > 0 && output_height > 0 && (img.width != output_width || img.height != output_height);
+
+    MppEncodedPacket packet;
+    if (needs_resize) {
+        try {
+            resized_img = img.resize(output_width, output_height);
+            encode_img = &resized_img;
+        } catch (const std::exception& e) {
+            VISIONG_LOG_WARN("DisplayRTSP", "Failed to resize frame for RTSP stream: " << e.what());
+            return false;
+        }
     }
 
-    const VencCodec venc_codec = (state.m_codec == Codec::H265) ? VencCodec::H265 : VencCodec::H264;
-    const int quality = state.m_quality.load(std::memory_order_relaxed);
-    const int fps_enc = visiong::venc::clamp_record_fps(fps);
-    const VencRcMode venc_rc = to_venc_rc_mode(static_cast<RcMode>(state.m_rc_mode.load(std::memory_order_relaxed)));
-
-    VencEncodedPacket packet;
-    if (!VencManager::getInstance().encodeToVideo(img, venc_codec, quality, packet, fps_enc, venc_rc)) {
+    if (state.m_mpp_channel < 0 ||
+        !MppEncoderManager::getInstance().encodeToVideoOnChannel(
+            state.m_mpp_channel, *encode_img, mpp_codec, quality, packet, fps_enc, mpp_rc)) {
         return false;
     }
     if (packet.data.empty()) {
@@ -413,7 +603,7 @@ bool DisplayRTSP::display(const ImageBuffer& img) {
     }
 
     if (log_connected) {
-        (void)VencManager::getInstance().requestIDR(true);
+        (void)MppEncoderManager::getInstance().requestIDRForChannel(state.m_mpp_channel, true);
         if (!state.m_suppress_logs.load(std::memory_order_relaxed)) {
             VISIONG_LOG_INFO("DisplayRTSP", "Client connected (streaming).");
         }

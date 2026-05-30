@@ -284,33 +284,40 @@ void bind_image_buffer(py::module_& m) {
                     py::call_guard<py::gil_scoped_release>(),
                     py::return_value_policy::move,
                     "Loads an image from a file into a new ImageBuffer. Supports JPEG, PNG, and BMP (via stb_image).")
-		.def("save", &ImageBuffer::save, "filepath"_a, "quality"_a = 75,
+        .def("save", &ImageBuffer::save, "filepath"_a, "quality"_a = 75,
              py::call_guard<py::gil_scoped_release>(),
-	             "Saves the ImageBuffer to a file. Supports JPEG, PNG, and BMP. Quality (1-100) applies to JPEG/PNG. Uses software encoding (stb_image).")
-
-	    .def("save_hsv_bin", &ImageBuffer::save_hsv_bin, "filepath"_a,
+             "Saves the ImageBuffer to a file. Supports JPEG, PNG, and BMP. JPEG uses the fastest available encoder and falls back automatically when needed.")
+        .def("save_jpg", &ImageBuffer::save_jpg, "filepath"_a, "quality"_a = 75,
              py::call_guard<py::gil_scoped_release>(),
-	         "Converts YUV420SP image to HSV using IVE hardware and saves raw HSV binary data to the given filepath. Input must be YUV420SP or YUV420SP_VU.")
-	         
-	    .def("save_venc_jpg", &ImageBuffer::save_venc_jpg, 
-	         "filepath"_a, "quality"_a = 75,
+             "Saves the image as JPEG. VisionG chooses the available encoder and falls back automatically when needed.")
+        .def("save_jpeg", &ImageBuffer::save_jpeg, "filepath"_a, "quality"_a = 75,
              py::call_guard<py::gil_scoped_release>(),
-	         "Saves image as JPEG using VENC hardware. If VENC is in use (e.g. by DisplayUDP), "
-	         "it checks if size and format match; otherwise, it auto-initializes the encoder.")
-	    .def("save_venc_h264", &ImageBuffer::save_venc_h264,
-	         "filepath"_a, "quality"_a = 75, "rc_mode"_a = "cbr", "fps"_a = 30, "append"_a = true,
-	         "container"_a = "auto", "mp4_faststart"_a = true,
+             "Saves the image as JPEG. Alias of save_jpg().")
+        .def("save_video", &ImageBuffer::save_video,
+             "filepath"_a, "quality"_a = 75, "fps"_a = 30, "append"_a = true, "codec"_a = "auto",
              py::call_guard<py::gil_scoped_release>(),
-	         "Saves H264 video using VENC hardware. rc_mode: 'cbr' or 'vbr'. "
-	         "container: 'auto'|'annexb'|'mp4'. If container='mp4' (or filepath endswith .mp4), "
-	         "it muxes into MP4 and caches the writer until close_venc_recorder/close_all_venc_recorders or process exit.")
-		.def("save_venc_h265", &ImageBuffer::save_venc_h265,
-	         "filepath"_a, "quality"_a = 75, "rc_mode"_a = "cbr", "fps"_a = 30, "append"_a = true,
-	         "container"_a = "auto", "mp4_faststart"_a = true,
+             "Appends this frame to a video file. The file extension chooses the container; codec='auto' uses H264 except for .h265/.hevc raw streams. Call close_video(filepath) or close_all_videos() to finalize implicit MP4 writers.")
+        .def("save_hsv_bin", &ImageBuffer::save_hsv_bin, "filepath"_a,
              py::call_guard<py::gil_scoped_release>(),
-	         "Saves H265 video using VENC hardware. rc_mode: 'cbr' or 'vbr'. "
-	         "container: 'auto'|'annexb'|'mp4'. If container='mp4' (or filepath endswith .mp4), "
-	         "it muxes into MP4 and caches the writer until close_venc_recorder/close_all_venc_recorders or process exit.")
+             "Converts YUV420SP image to HSV using IVE hardware and saves raw HSV binary data to the given filepath. Input must be YUV420SP or YUV420SP_VU.")
+        .def("save_mpp_jpg", &ImageBuffer::save_mpp_jpg,
+             "filepath"_a, "quality"_a = 75,
+             py::call_guard<py::gil_scoped_release>(),
+             "Advanced: saves image as JPEG through the MPP encoder.")
+        .def("save_mpp_h264", &ImageBuffer::save_mpp_h264,
+             "filepath"_a, "quality"_a = 75, "rc_mode"_a = "cbr", "fps"_a = 30, "append"_a = true,
+             "container"_a = "auto", "mp4_faststart"_a = true,
+             py::call_guard<py::gil_scoped_release>(),
+             "Advanced: saves H264 video through the hardware encoder. rc_mode: 'cbr' or 'vbr'. "
+             "container: 'auto'|'annexb'|'mp4'. If container='mp4' (or filepath endswith .mp4), "
+             "it muxes into MP4 and caches the writer until close_mpp_recorder/close_all_mpp_recorders.")
+        .def("save_mpp_h265", &ImageBuffer::save_mpp_h265,
+             "filepath"_a, "quality"_a = 75, "rc_mode"_a = "cbr", "fps"_a = 30, "append"_a = true,
+             "container"_a = "auto", "mp4_faststart"_a = true,
+             py::call_guard<py::gil_scoped_release>(),
+             "Advanced: saves H265 video through the hardware encoder. rc_mode: 'cbr' or 'vbr'. "
+             "container: 'auto'|'annexb'|'mp4'. If container='mp4' (or filepath endswith .mp4), "
+             "it muxes into MP4 and caches the writer until close_mpp_recorder/close_all_mpp_recorders.")
 		.def("to_format", [](const ImageBuffer& self, const std::string& fmt) {
 	            return self.to_format(visiong::parse_pixel_format(fmt));
 	        }, "new_format"_a, py::call_guard<py::gil_scoped_release>(), py::return_value_policy::move,

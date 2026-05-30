@@ -524,8 +524,8 @@ const char* to_cstr(BufferOwner owner) {
             return "RGA";
         case BufferOwner::NPU:
             return "NPU";
-        case BufferOwner::VENC:
-            return "VENC";
+        case BufferOwner::MPP:
+            return "MPP";
         case BufferOwner::IVE:
             return "IVE";
         case BufferOwner::External:

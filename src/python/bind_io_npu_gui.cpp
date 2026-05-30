@@ -49,20 +49,21 @@ ASRResult infer_asr_from_numpy(ASR& self,
 
 void bind_io_devices(py::module_& m) {
     py::class_<DisplayUDP>(m, "DisplayUDP")
-        .def(py::init<const std::string&, int, int>(), "udp_ip"_a = "", "udp_port"_a = 8000, "jpeg_quality"_a = 75,
+        .def(py::init<const std::string&, int, int, int>(), "udp_ip"_a = "", "udp_port"_a = 8000,
+             "jpeg_quality"_a = 75, "mpp_channel"_a = -1,
              "Creates DisplayUDP. If udp_ip is empty, the SSH/VigIDE client IP is used first, then usb0 is auto-detected, then 172.32.0.100 is used as fallback.\n"
-             "DisplayUDP keeps its own JPEG session lock to reduce VENC re-init: color priority is BGR > RGB > YUV > other, and size only grows while smaller frames are black-padded to the locked canvas.\n"
-             "创建 DisplayUDP。也可之后调用 init(ip_address, port, jpeg_quality) 修改目标。\n"
-             "DisplayUDP 为了减少 VENC 反复重初始化，会维持自己的 JPEG 会话锁：颜色优先级为 BGR > RGB > YUV > 其他；尺寸只会向更大方向扩张，较小帧会补黑边到锁定画布。")
+             "VisionG keeps the stream encoder stable and handles frame format or size changes internally.")
         .def("init", &DisplayUDP::init, "ip_address"_a = "", "port"_a = 8000, "jpeg_quality"_a = 75,
+             "mpp_channel"_a = -1,
              py::call_guard<py::gil_scoped_release>(),
-             "Initializes or re-initializes the UDP sender (target IP, port, JPEG quality 1-100). Empty ip_address uses SSH/VigIDE client IP first, then usb0/default fallback.")
+             "Initializes or re-initializes the UDP sender. Empty ip_address uses SSH/VigIDE client IP first, then usb0/default fallback. mpp_channel is an advanced override.")
         .def("display", &DisplayUDP::display, "img_buf"_a,
              py::call_guard<py::gil_scoped_release>(),
-             "Encodes the ImageBuffer to JPEG (VENC) and sends it via UDP to the configured address. The DisplayUDP-local lock may convert color format and black-pad smaller frames before encoding.\n"
-             "把 ImageBuffer 编码成 JPEG（VENC）并通过 UDP 发到目标地址。编码前可能会根据 DisplayUDP 的本地锁定策略做颜色格式转换和黑边补齐。")
+             "Sends the ImageBuffer as a UDP JPEG frame. VisionG handles encoder choice, format conversion, and padding internally.")
         .def("release", &DisplayUDP::release, py::call_guard<py::gil_scoped_release>(), "Releases DisplayUDP resources.")
-        .def("is_initialized", &DisplayUDP::is_initialized, "Checks if DisplayUDP is initialized.");
+        .def("is_initialized", &DisplayUDP::is_initialized, "Checks if DisplayUDP is initialized.")
+        .def("get_mpp_channel", &DisplayUDP::get_mpp_channel,
+             "Advanced: returns the hardware encoder channel used by this UDP sender, or -1 if not initialized.");
 
     py::class_<TouchPoint>(m, "TouchPoint", "Represents a single touch coordinate.")
         .def_readonly("x", &TouchPoint::x)

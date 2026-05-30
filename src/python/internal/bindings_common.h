@@ -20,7 +20,7 @@
 #include "visiong/modules/DisplaySPI.h"
 #include "visiong/modules/DisplayUDP.h"
 #include "visiong/modules/Touch.h"
-#include "visiong/modules/VencRecorder.h"
+#include "visiong/modules/MppRecorder.h"
 #include "im2d.hpp"
 #include "visiong/common/build_config.h"
 #include "visiong/common/pixel_format.h"
@@ -59,8 +59,8 @@ ModelType parse_model_type(const std::string& model_type_str);
 #endif
 DisplayRTSP::Codec parse_rtsp_codec(const std::string& codec_str);
 DisplayRTSP::RcMode parse_rtsp_rc_mode(const std::string& rc_mode_str);
-VencRecorder::Codec parse_venc_codec(const std::string& codec_str);
-VencRecorder::Container parse_venc_container(const std::string& container_str);
+MppRecorder::Codec parse_mpp_codec(const std::string& codec_str);
+MppRecorder::Container parse_mpp_container(const std::string& container_str);
 DisplayHTTPFLV::Codec parse_httpflv_codec(const std::string& codec_str);
 DisplayHTTPFLV::RcMode parse_httpflv_rc_mode(const std::string& rc_mode_str);
 

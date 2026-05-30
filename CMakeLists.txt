@@ -17,7 +17,7 @@ option(VISIONG_ENABLE_IVE "Build the IVE component." ON)
 option(VISIONG_ENABLE_NPU "Build the NPU component." ON)
 option(VISIONG_ENABLE_GUI "Build the GUI component." ON)
 
-set(VISIONG_VERSION "1.1.2" CACHE STRING "Public version string for the Python module and C++ library.")
+set(VISIONG_VERSION "1.2.0" CACHE STRING "Public version string for the Python module and C++ library.")
 set(VISIONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(VISIONG_SDK_ROOT "" CACHE PATH "Root directory of a Luckfox/Rockchip SDK.")
@@ -33,6 +33,8 @@ set(VISIONG_VENDOR_INCLUDE_DIR "" CACHE PATH "Directory containing Rockchip SDK 
 set(VISIONG_RGA_INCLUDE_DIR "" CACHE PATH "Directory containing librga headers (im2d.h).")
 set(VISIONG_IVE_INCLUDE_DIR "" CACHE PATH "Directory containing IVE headers (rk_mpi_ive.h).")
 set(VISIONG_RKNN_INCLUDE_DIR "" CACHE PATH "Directory containing RKNN runtime headers (rknn_api.h).")
+
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES VISIONG_TOOLCHAIN_ROOT)
 
 function(visiong_first_existing out_var)
     foreach(candidate IN LISTS ARGN)
@@ -320,12 +322,16 @@ if(VISIONG_STRIP_SYMBOLS)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--strip-all")
 endif()
 if(VISIONG_ENABLE_LTO)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT _visiong_lto_supported OUTPUT _visiong_lto_error)
-    if(_visiong_lto_supported)
+    if(CMAKE_CROSSCOMPILING)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
     else()
-        message(WARNING "LTO requested but unavailable: ${_visiong_lto_error}")
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT _visiong_lto_supported OUTPUT _visiong_lto_error)
+        if(_visiong_lto_supported)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+        else()
+            message(WARNING "LTO requested but unavailable: ${_visiong_lto_error}")
+        endif()
     endif()
 endif()
 
@@ -376,9 +382,10 @@ set(VISIONG_MODULE_BASE_SRCS
     src/modules/internal/gui_render_utils.cpp
     src/modules/ISPController.cpp
     src/modules/Touch.cpp
-    src/modules/VencManager.cpp
-    src/modules/VencManagerEncode.cpp
-    src/modules/VencRecorder.cpp
+    src/modules/internal/mpp_encoder_backend.cpp
+    src/modules/MppEncoderManager.cpp
+    src/modules/MppEncoderManagerEncode.cpp
+    src/modules/MppRecorder.cpp
 )
 
 set(VISIONG_MODULE_GUI_SRCS
@@ -752,6 +759,22 @@ if(VISIONG_BUILD_PYTHON_MODULE)
         BUILD_RPATH "$ORIGIN:/oem/usr/lib"
         INSTALL_RPATH "$ORIGIN:/oem/usr/lib"
     )
+    add_custom_target(visiong_python_artifacts ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VISIONG_ROOT}/src/python/visiong.py"
+            "${CMAKE_BINARY_DIR}/visiong.py"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_BINARY_DIR}/libs/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:visiong_python_module>"
+            "${CMAKE_BINARY_DIR}/libs/python/$<TARGET_FILE_NAME:visiong_python_module>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VISIONG_ROOT}/src/python/visiong.py"
+            "${CMAKE_BINARY_DIR}/libs/python/visiong.py"
+        DEPENDS "${VISIONG_ROOT}/src/python/visiong.py"
+        COMMENT "Staging VisionG Python artifacts"
+    )
+    add_dependencies(visiong_python_artifacts visiong_python_module)
 else()
     message(STATUS "VISIONG_BUILD_PYTHON_MODULE=OFF: skipping _visiong.so build.")
 endif()

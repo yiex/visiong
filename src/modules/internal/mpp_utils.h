@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#ifndef VISIONG_MODULES_VENC_UTILS_H_
-#define VISIONG_MODULES_VENC_UTILS_H_
+#ifndef VISIONG_MODULES_MPP_UTILS_H_
+#define VISIONG_MODULES_MPP_UTILS_H_
 
 #include "common/internal/string_utils.h"
 
@@ -9,7 +9,7 @@
 #include <string>
 
 namespace visiong {
-namespace venc {
+namespace mpp {
 
 inline int clamp_quality(int quality) {
     return std::clamp(quality, 1, 100);
@@ -35,8 +35,8 @@ inline std::string normalize_rc_mode(const std::string& rc_mode) {
     throw std::invalid_argument("rc_mode must be 'cbr' or 'vbr'.");
 }
 
-} // namespace venc
+} // namespace mpp
 } // namespace visiong
 
-#endif // VISIONG_MODULES_VENC_UTILS_H_
+#endif // VISIONG_MODULES_MPP_UTILS_H_
 

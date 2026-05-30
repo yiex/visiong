@@ -38,8 +38,16 @@ public:
     const ImageBuffer& get_gray_version() const;
 
     void save_hsv_bin(const std::string& filepath) const;
-    void save_venc_jpg(const std::string& filepath, int quality = 75) const;
-    void save_venc_h264(
+    void save_jpg(const std::string& filepath, int quality = 75) const;
+    void save_jpeg(const std::string& filepath, int quality = 75) const;
+    void save_video(
+        const std::string& filepath,
+        int quality = 75,
+        int fps = 30,
+        bool append = true,
+        const std::string& codec = "auto") const;
+    void save_mpp_jpg(const std::string& filepath, int quality = 75) const;
+    void save_mpp_h264(
         const std::string& filepath,
         int quality = 75,
         const std::string& rc_mode = "cbr",
@@ -47,7 +55,7 @@ public:
         bool append = true,
         const std::string& container = "auto",
         bool mp4_faststart = true) const;
-    void save_venc_h265(
+    void save_mpp_h265(
         const std::string& filepath,
         int quality = 75,
         const std::string& rc_mode = "cbr",

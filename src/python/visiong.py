@@ -102,8 +102,101 @@ for _name in dir(_mod):
 
 
 _NativeDisplaySPI = globals().get("DisplaySPI")
+_NativeMppRecorder = globals().get("MppRecorder")
 _SHORT_GPIO_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)_?(?P<group>[A-Da-d])(?P<index>[0-7])(?:_d)?$")
 _GPIO_OFFSET_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)[-:](?P<pin>\d+)$", re.IGNORECASE)
+
+
+def _video_codec_from_path(filepath, codec="auto"):
+    codec_text = str(codec or "auto").strip().lower()
+    if codec_text in ("h264", "avc"):
+        return "h264"
+    if codec_text in ("h265", "hevc"):
+        return "h265"
+    if codec_text != "auto":
+        raise ValueError("codec must be 'auto', 'h264', or 'h265'")
+
+    ext = os.path.splitext(str(filepath))[1].lower()
+    return "h265" if ext in (".h265", ".hevc") else "h264"
+
+
+def _video_container_from_path(filepath):
+    ext = os.path.splitext(str(filepath))[1].lower()
+    return "mp4" if ext == ".mp4" else "annexb"
+
+
+def _friendly_video_error(exc):
+    text = str(exc)
+    for old, new in (
+        ("MppRecorder", "video recorder"),
+        ("MPP", "video encoder"),
+        ("mpp", "video encoder"),
+    ):
+        text = text.replace(old, new)
+    return text
+
+
+class VideoRecorder:
+    """Simple video writer. Construct once, call write(frame), then close()."""
+
+    def __init__(self, filepath, quality=75, fps=30, codec="auto"):
+        if _NativeMppRecorder is None:
+            raise RuntimeError("Video recording is not available in this build")
+        self.filepath = str(filepath)
+        self.codec = _video_codec_from_path(self.filepath, codec)
+        self.container = _video_container_from_path(self.filepath)
+        try:
+            self._recorder = _NativeMppRecorder(
+                self.filepath,
+                codec=self.codec,
+                container=self.container,
+                quality=int(quality),
+                fps=int(fps),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"VideoRecorder: failed to create recorder. {_friendly_video_error(exc)}") from None
+
+    def write(self, img):
+        recorder = getattr(self, "_recorder", None)
+        if recorder is None:
+            raise RuntimeError("VideoRecorder: recorder is closed")
+        try:
+            recorder.write(img)
+        except Exception as exc:
+            raise RuntimeError(f"VideoRecorder: failed to write frame. {_friendly_video_error(exc)}") from None
+
+    def close(self):
+        recorder = getattr(self, "_recorder", None)
+        if recorder is not None:
+            try:
+                recorder.close()
+            except Exception as exc:
+                raise RuntimeError(f"VideoRecorder: failed to close video. {_friendly_video_error(exc)}") from None
+            finally:
+                self._recorder = None
+
+    def is_open(self):
+        return getattr(self, "_recorder", None) is not None
+
+    def is_started(self):
+        recorder = getattr(self, "_recorder", None)
+        return bool(recorder is not None and recorder.is_open())
+
+    def path(self):
+        return self.filepath
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _gpio_offset_to_name(bank, pin):

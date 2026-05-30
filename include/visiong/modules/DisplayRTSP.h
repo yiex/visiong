@@ -13,8 +13,16 @@ class DisplayRTSP {
 
     enum class RcMode { CBR = 0, VBR = 1 };
 
-    DisplayRTSP(int port = 554, const std::string& path = "/live/0", int quality = 75,
-                Codec codec = Codec::H264, int fps = 30, int logs = 0, RcMode rc_mode = RcMode::CBR);
+    DisplayRTSP(int port = 554,
+                const std::string& path = "/live/0",
+                int quality = 75,
+                Codec codec = Codec::H264,
+                int fps = 30,
+                int logs = 0,
+                RcMode rc_mode = RcMode::CBR,
+                int output_width = 0,
+                int output_height = 0,
+                int mpp_channel = -1);
     ~DisplayRTSP();
 
     DisplayRTSP(const DisplayRTSP&) = delete;
@@ -33,6 +41,10 @@ class DisplayRTSP {
     bool get_suppress_logs() const;
     void set_logs(int logs);
     int get_logs() const;
+    void set_output_size(int width, int height);
+    int get_output_width() const;
+    int get_output_height() const;
+    int get_mpp_channel() const;
 
     bool display(const ImageBuffer& img);
 

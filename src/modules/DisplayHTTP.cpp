@@ -3,13 +3,13 @@
 #include "visiong/modules/DisplayHTTPFLV.h"
 #include "visiong/common/pixel_format.h"
 #include "visiong/core/ImageBuffer.h"
-#include "visiong/modules/VencManager.h"
+#include "visiong/modules/MppEncoderManager.h"
 #include "visiong/core/NetUtils.h"
 #include "common/internal/string_utils.h"
 #include "core/internal/logger.h"
 #include "modules/internal/http_socket_utils.h"
 #include "modules/internal/jpeg_lock_utils.h"
-#include "modules/internal/venc_utils.h"
+#include "modules/internal/mpp_utils.h"
 
 #include <sstream>
 #include <cstring>
@@ -42,7 +42,7 @@ static std::string normalize_flv_codec(const std::string& codec) {
 
 static std::string normalize_flv_rc_mode(const std::string& rc_mode) {
     try {
-        return visiong::venc::normalize_rc_mode(rc_mode);
+        return visiong::mpp::normalize_rc_mode(rc_mode);
     } catch (const std::invalid_argument&) {
         return "cbr";
     }
@@ -75,7 +75,7 @@ struct DisplayHTTP::Impl {
     std::atomic<int> quality{75};
     std::atomic<int> max_fps{30};
     std::atomic<int> client_count{0};
-    std::atomic<bool> venc_user_acquired{false};
+    std::atomic<bool> mpp_user_acquired{false};
     std::string stream_type = "jpg";
     std::string flv_path = "/live.flv";
     std::string flv_codec = "h264";
@@ -106,9 +106,9 @@ DisplayHTTP::DisplayHTTP(int port, int quality,
                          const std::string& flv_rc_mode)
     : m_impl(std::make_unique<Impl>()) {
     m_impl->port = port;
-    m_impl->flv_fps = visiong::venc::clamp_non_negative_fps(flv_fps);
+    m_impl->flv_fps = visiong::mpp::clamp_non_negative_fps(flv_fps);
     m_impl->max_fps.store(m_impl->flv_fps, std::memory_order_relaxed);
-    m_impl->quality.store(visiong::venc::clamp_quality(quality), std::memory_order_relaxed);
+    m_impl->quality.store(visiong::mpp::clamp_quality(quality), std::memory_order_relaxed);
     m_impl->stream_type = visiong::to_lower_copy(mode);
     if (m_impl->stream_type != "flv") m_impl->stream_type = "jpg";
 
@@ -132,7 +132,7 @@ void DisplayHTTP::start() {
     }
 
     m_impl->client_count.store(0, std::memory_order_relaxed);
-    m_impl->venc_user_acquired.store(false, std::memory_order_relaxed);
+    m_impl->mpp_user_acquired.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> frame_lock(m_impl->frame_mutex);
         m_impl->latest_jpeg_frame.reset();
@@ -244,10 +244,10 @@ void DisplayHTTP::stop() {
             t.thread.join();
         }
     }
-    if (m_impl->venc_user_acquired.exchange(false, std::memory_order_relaxed)) {
-        VencManager::getInstance().releaseUser();
+    if (m_impl->mpp_user_acquired.exchange(false, std::memory_order_relaxed)) {
+        MppEncoderManager::getInstance().releaseUser();
     }
-    VencManager::getInstance().releaseVencIfUnused();
+    MppEncoderManager::getInstance().releaseMppIfUnused();
 
     if (m_impl->flv) {
         m_impl->flv->stop();
@@ -278,13 +278,13 @@ bool DisplayHTTP::display(const ImageBuffer& img) {
     }
 
     if (m_impl->client_count.load(std::memory_order_relaxed) <= 0) {
-        if (m_impl->venc_user_acquired.exchange(false, std::memory_order_relaxed)) {
-            VencManager::getInstance().releaseUser();
+        if (m_impl->mpp_user_acquired.exchange(false, std::memory_order_relaxed)) {
+            MppEncoderManager::getInstance().releaseUser();
         }
         return true;
     }
-    if (!m_impl->venc_user_acquired.exchange(true, std::memory_order_relaxed)) {
-        VencManager::getInstance().acquireUser();
+    if (!m_impl->mpp_user_acquired.exchange(true, std::memory_order_relaxed)) {
+        MppEncoderManager::getInstance().acquireUser();
     }
 
     {
@@ -301,11 +301,11 @@ bool DisplayHTTP::display(const ImageBuffer& img) {
         }
     }
 
-    VencManager& venc = VencManager::getInstance();
+    MppEncoderManager& mpp = MppEncoderManager::getInstance();
     const int q = m_impl->quality.load(std::memory_order_relaxed);
     bool use_sw = false;
-    if (venc.isInitialized() && venc.getCodec() != VencCodec::JPEG) {
-        use_sw = true; // VENC is busy with H264/H265
+    if (mpp.isInitialized() && mpp.getCodec() != MppCodec::JPEG && !mpp.canReconfigure()) {
+        use_sw = true; // MPP is busy with H264/H265
     }
 
     PIXEL_FORMAT_E locked_format = RK_FMT_BUTT;
@@ -375,16 +375,16 @@ bool DisplayHTTP::display(const ImageBuffer& img) {
 
     std::vector<unsigned char> jpeg_data;
     if (!use_sw) {
-        if (!m_impl->venc_user_acquired.exchange(true, std::memory_order_relaxed)) {
-            venc.acquireUser();
+        if (!m_impl->mpp_user_acquired.exchange(true, std::memory_order_relaxed)) {
+            mpp.acquireUser();
         }
-        jpeg_data = venc.encodeToJpeg(*encode_buf, q);
+        jpeg_data = mpp.encodeToJpeg(*encode_buf, q);
         if (jpeg_data.empty()) {
             // Hardware JPEG failed; fallback to software / 硬件 JPEG 失败，回退到软件路径。
             use_sw = true;
-            if (m_impl->venc_user_acquired.exchange(false, std::memory_order_relaxed)) {
-                venc.releaseUser();
-                venc.releaseVencIfUnused();
+            if (m_impl->mpp_user_acquired.exchange(false, std::memory_order_relaxed)) {
+                mpp.releaseUser();
+                mpp.releaseMppIfUnused();
             }
         }
     }
@@ -579,7 +579,7 @@ void DisplayHTTP::client_handler(int client_socket, ClientThread* client_state) 
 
 void DisplayHTTP::set_fps(int fps) {
     if (m_impl->flv) { m_impl->flv->set_fps(fps); return; }
-    fps = visiong::venc::clamp_non_negative_fps(fps);
+    fps = visiong::mpp::clamp_non_negative_fps(fps);
     m_impl->max_fps.store(fps, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(m_impl->display_mutex);
     m_impl->has_sent = false;
@@ -593,7 +593,7 @@ int DisplayHTTP::get_fps() const {
 
 void DisplayHTTP::set_quality(int quality) {
     if (m_impl->flv) { m_impl->flv->set_quality(quality); return; }
-    quality = visiong::venc::clamp_quality(quality);
+    quality = visiong::mpp::clamp_quality(quality);
     m_impl->quality.store(quality, std::memory_order_relaxed);
 }
 

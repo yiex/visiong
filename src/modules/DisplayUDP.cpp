@@ -3,9 +3,9 @@
 
 #include "visiong/core/ImageBuffer.h"
 #include "visiong/common/pixel_format.h"
-#include "visiong/modules/VencManager.h"
+#include "visiong/modules/MppEncoderManager.h"
 #include "core/internal/logger.h"
-#include "modules/internal/venc_utils.h"
+#include "modules/internal/mpp_utils.h"
 #include "modules/internal/jpeg_lock_utils.h"
 #include "core/internal/runtime_init.h"
 
@@ -29,8 +29,9 @@ struct DisplayUDP::Impl {
     std::string udp_ip_address;
     int udp_port_number;
     int jpeg_quality;
+    int mpp_channel = -1;
+    bool mpp_channel_acquired = false;
     std::atomic<bool> initialized{false};
-    std::atomic<bool> venc_user_acquired{false};
     int sockfd = -1;
     struct sockaddr_in server_address {};
     uint16_t picture_index = 0;
@@ -168,12 +169,10 @@ std::string derive_udp_target_ip(const std::string& requested_ip) {
 
 } // namespace
 
-DisplayUDP::DisplayUDP(const std::string& udp_ip, int udp_port, int jpeg_quality)
+DisplayUDP::DisplayUDP(const std::string& udp_ip, int udp_port, int jpeg_quality, int mpp_channel)
     : m_impl(std::make_unique<Impl>()) {
-    m_impl->udp_port_number = udp_port;
-    m_impl->jpeg_quality = visiong::venc::clamp_quality(jpeg_quality);
     std::memset(&m_impl->server_address, 0, sizeof(m_impl->server_address));
-    if (!init(udp_ip, udp_port, jpeg_quality)) {
+    if (!init(udp_ip, udp_port, jpeg_quality, mpp_channel)) {
         VISIONG_LOG_ERROR("DisplayUDP", "Initialization failed in constructor.");
     }
 }
@@ -182,14 +181,16 @@ DisplayUDP::~DisplayUDP() {
     release();
 }
 
-bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality) {
+bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality, int mpp_channel) {
     Impl& state = *m_impl;
     if (state.initialized.load(std::memory_order_relaxed)) {
         release();
     }
     state.udp_ip_address = derive_udp_target_ip(udp_ip);
     state.udp_port_number = udp_port;
-    state.jpeg_quality = visiong::venc::clamp_quality(jpeg_quality);
+    state.jpeg_quality = visiong::mpp::clamp_quality(jpeg_quality);
+    state.mpp_channel = -1;
+    state.mpp_channel_acquired = false;
     {
         std::lock_guard<std::mutex> lock(state.lock_mutex);
         state.locked_format = RK_FMT_BUTT;
@@ -199,13 +200,30 @@ bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality)
     }
 
     if (!init_sys_if_needed()) {
+        if (state.mpp_channel_acquired) {
+            MppEncoderManager::getInstance().releaseDedicatedChannel(state.mpp_channel);
+            state.mpp_channel_acquired = false;
+            state.mpp_channel = -1;
+        }
         return false;
     }
+
+    state.mpp_channel = MppEncoderManager::getInstance().acquireDedicatedChannel(mpp_channel);
+    if (state.mpp_channel < 0) {
+        VISIONG_LOG_WARN("DisplayUDP", "No free dedicated MPP channel is available.");
+        return false;
+    }
+    state.mpp_channel_acquired = true;
 
     if (state.sockfd != -1) {
         close(state.sockfd);
     }
     if ((state.sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        if (state.mpp_channel_acquired) {
+            MppEncoderManager::getInstance().releaseDedicatedChannel(state.mpp_channel);
+            state.mpp_channel_acquired = false;
+            state.mpp_channel = -1;
+        }
         return false;
     }
     state.server_address.sin_family = AF_INET;
@@ -213,13 +231,19 @@ bool DisplayUDP::init(const std::string& udp_ip, int udp_port, int jpeg_quality)
     if (inet_pton(AF_INET, state.udp_ip_address.c_str(), &state.server_address.sin_addr) <= 0) {
         close(state.sockfd);
         state.sockfd = -1;
+        if (state.mpp_channel_acquired) {
+            MppEncoderManager::getInstance().releaseDedicatedChannel(state.mpp_channel);
+            state.mpp_channel_acquired = false;
+            state.mpp_channel = -1;
+        }
         return false;
     }
 
     state.initialized.store(true, std::memory_order_relaxed);
     VISIONG_LOG_INFO("DisplayUDP",
                      "Initialized, ready to stream to " << state.udp_ip_address << ":" << udp_port
-                                                         << " with JPEG quality " << state.jpeg_quality);
+                                                         << " with JPEG quality " << state.jpeg_quality
+                                                         << " on MPP channel " << state.mpp_channel);
     return true;
 }
 
@@ -228,9 +252,8 @@ bool DisplayUDP::display(const ImageBuffer& img_buf) {
     if (!state.initialized.load(std::memory_order_relaxed) || !img_buf.is_valid()) {
         return false;
     }
-
-    if (!state.venc_user_acquired.exchange(true, std::memory_order_relaxed)) {
-        VencManager::getInstance().acquireUser();
+    if (state.mpp_channel < 0) {
+        return false;
     }
 
     PIXEL_FORMAT_E locked_format = RK_FMT_BUTT;
@@ -299,9 +322,13 @@ bool DisplayUDP::display(const ImageBuffer& img_buf) {
         encode_buf = &padded_owner;
     }
 
-    std::vector<unsigned char> jpeg_data =
-        VencManager::getInstance().encodeToJpeg(*encode_buf, state.jpeg_quality);
-    if (jpeg_data.empty()) {
+    MppEncodedPacket packet;
+    if (!MppEncoderManager::getInstance().encodeToVideoOnChannel(state.mpp_channel,
+                                                                  *encode_buf,
+                                                                  MppCodec::JPEG,
+                                                                  state.jpeg_quality,
+                                                                  packet) ||
+        packet.data.empty()) {
         VISIONG_LOG_WARN("DisplayUDP", "Failed to encode image.");
         return false;
     }
@@ -311,11 +338,11 @@ bool DisplayUDP::display(const ImageBuffer& img_buf) {
     }
 
     char header[64];
-    const int header_len = snprintf(header, sizeof(header), "frameData,%zu,%hu,jpeg", jpeg_data.size(), state.picture_index++);
+    const int header_len = snprintf(header, sizeof(header), "frameData,%zu,%hu,jpeg", packet.data.size(), state.picture_index++);
     sendto(state.sockfd, header, header_len, 0,
            reinterpret_cast<const sockaddr*>(&state.server_address), sizeof(state.server_address));
-    const unsigned char* ptr = jpeg_data.data();
-    size_t left = jpeg_data.size();
+    const unsigned char* ptr = packet.data.data();
+    size_t left = packet.data.size();
     while (left > 0) {
         const size_t chunk = std::min(left, static_cast<size_t>(UDP_SEND_MAX_LEN));
         const ssize_t sent = sendto(state.sockfd, ptr, chunk, 0,
@@ -332,14 +359,14 @@ bool DisplayUDP::display(const ImageBuffer& img_buf) {
 
 void DisplayUDP::release() {
     Impl& state = *m_impl;
-    if (state.venc_user_acquired.exchange(false, std::memory_order_relaxed)) {
-        VencManager::getInstance().releaseUser();
-    }
-    VencManager::getInstance().releaseVencIfUnused();
-
     if (state.sockfd >= 0) {
         close(state.sockfd);
         state.sockfd = -1;
+    }
+    if (state.mpp_channel_acquired && state.mpp_channel >= 0) {
+        MppEncoderManager::getInstance().releaseDedicatedChannel(state.mpp_channel);
+        state.mpp_channel_acquired = false;
+        state.mpp_channel = -1;
     }
     {
         std::lock_guard<std::mutex> lock(state.lock_mutex);
@@ -353,6 +380,10 @@ void DisplayUDP::release() {
 
 bool DisplayUDP::is_initialized() const {
     return m_impl->initialized.load(std::memory_order_relaxed);
+}
+
+int DisplayUDP::get_mpp_channel() const {
+    return m_impl ? m_impl->mpp_channel : -1;
 }
 
 const char* DisplayUDP::PixelFormatToString(int format) {

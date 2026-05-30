@@ -833,7 +833,7 @@ int CaptureV4L2Impl::read_frame_to_yuv_buffer(ImageBuffer& frame_out) {
             MB_BLK mb_blk = MB_INVALID_HANDLE;
             if (RK_MPI_SYS_CreateMB(&mb_blk, &ext) == 0 && mb_blk != MB_INVALID_HANDLE) {
                 frame_out = ImageBuffer(cap_width, cap_height, RK_FMT_YUV420SP, mb_blk);
-                // Align strides to VENC-friendly boundaries. / 将步幅对齐到更适合 VENC 的边界。
+                // Align strides to encoder-friendly boundaries.
                 frame_out.w_stride = (cap_width + 15) & ~15;
                 frame_out.h_stride = (cap_height + 1) & ~1;
                 visiong::bufstate::mark_device_write(frame_out, visiong::bufstate::BufferOwner::Camera);

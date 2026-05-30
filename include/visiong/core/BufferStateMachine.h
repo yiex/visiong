@@ -24,7 +24,7 @@ enum class BufferOwner : uint8_t {
     Camera,
     RGA,
     NPU,
-    VENC,
+    MPP,
     IVE,
     External,
 };

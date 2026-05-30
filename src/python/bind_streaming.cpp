@@ -29,7 +29,7 @@ void bind_streaming(py::module_& m) {
              "Stops the HTTP server and disconnects all clients. This is automatically called when the object is garbage collected.")
         .def("display", &DisplayHTTP::display, "img"_a,
              py::call_guard<py::gil_scoped_release>(),
-             "Encodes the ImageBuffer to JPEG (VENC) and pushes the frame to all connected MJPEG clients. In mode='jpg', DisplayHTTP keeps a local JPEG lock and may convert color format or black-pad smaller frames before encoding.")
+             "Displays an ImageBuffer. In mode='jpg', it encodes to MJPEG. In mode='flv', it updates the latest frame cache; a background encoder pushes HTTP-FLV at the configured flv_fps.")
         .def("is_running", &DisplayHTTP::is_running,
              "Returns True if the server is currently running.")
         .def("set_fps", &DisplayHTTP::set_fps, "fps"_a,
@@ -41,14 +41,26 @@ void bind_streaming(py::module_& m) {
         .def("get_quality", &DisplayHTTP::get_quality,
              "Returns current JPEG quality (1-100).");
 
-    py::class_<DisplayRTSP>(m, "DisplayRTSP", "An RTSP streamer using hardware VENC (H264/H265). Supports multiple concurrent clients, TCP interleaved and UDP unicast transport.")
-        .def(py::init([](int port, const std::string& path, int quality, const std::string& codec, int fps, int logs, const std::string& rc_mode) {
+    py::class_<DisplayRTSP>(m, "DisplayRTSP",
+        "An RTSP streamer. VisionG handles capture-frame resize, encoder setup, and stream packetization internally.")
+        .def(py::init([](int port,
+                         const std::string& path,
+                         int quality,
+                         const std::string& codec,
+                         int fps,
+                         int logs,
+                         const std::string& rc_mode,
+                         int width,
+                         int height,
+                         int mpp_channel) {
             auto streamer = std::make_unique<DisplayRTSP>(port, path, quality,
                                                           parse_rtsp_codec(codec), fps, logs,
-                                                          parse_rtsp_rc_mode(rc_mode));
+                                                          parse_rtsp_rc_mode(rc_mode),
+                                                          width, height, mpp_channel);
             streamer->start();
             return streamer;
         }), "port"_a = 554, "path"_a = "/live/0", "quality"_a = 75, "codec"_a = "h264", "fps"_a = 30, "logs"_a = 0, "rc_mode"_a = "cbr",
+            "width"_a = 0, "height"_a = 0, "mpp_channel"_a = -1,
         "Initializes and immediately starts the RTSP streamer.\n\n"
         "Args:\n"
         "    port (int): The RTSP port (default 554).\n"
@@ -57,7 +69,10 @@ void bind_streaming(py::module_& m) {
         "    codec (str): 'h264' or 'h265'.\n"
         "    fps (int): Max frames per second (default 30).\n"
         "    logs (int): 1 to enable logs, 0 to suppress.\n"
-        "    rc_mode (str): 'cbr' or 'vbr' (default 'cbr').")
+        "    rc_mode (str): 'cbr' or 'vbr' (default 'cbr').\n"
+        "    width (int): Optional encoded output width. 0 keeps input width.\n"
+        "    height (int): Optional encoded output height. 0 keeps input height.\n"
+        "    mpp_channel (int): Advanced hardware encoder channel override. -1 auto-allocates.")
         .def("stop", &DisplayRTSP::stop,
              py::call_guard<py::gil_scoped_release>(),
              "Stops the RTSP server. This is automatically called when the object is garbage collected.")
@@ -80,25 +95,37 @@ void bind_streaming(py::module_& m) {
              "Sets logs: 1 enable, 0 suppress.")
         .def("get_logs", &DisplayRTSP::get_logs,
              "Returns 1 if logs are enabled, otherwise 0.")
+        .def("set_output_size", &DisplayRTSP::set_output_size, "width"_a, "height"_a,
+             "Sets encoded output size. Use 0, 0 to keep the input frame size.")
+        .def("get_output_width", &DisplayRTSP::get_output_width,
+             "Returns encoded output width, or 0 if input width is used.")
+        .def("get_output_height", &DisplayRTSP::get_output_height,
+             "Returns encoded output height, or 0 if input height is used.")
+        .def("get_mpp_channel", &DisplayRTSP::get_mpp_channel,
+             "Advanced: returns the hardware encoder channel used by this stream.")
         .def("display", &DisplayRTSP::display, "img"_a,
              py::call_guard<py::gil_scoped_release>(),
-             "Encodes the ImageBuffer and pushes the frame to all connected RTSP clients.")
+             "Pushes the frame to all connected RTSP clients. VisionG handles resizing and encoding internally.")
         .def("is_running", &DisplayRTSP::is_running,
              "Returns True if the server is currently running.");
 
-    py::class_<VencRecorder>(m, "VencRecorder", "Hardware VENC recorder (Annex-B raw stream or MP4 mux).")
+    py::class_<MppRecorder>(m, "MppRecorder", "Advanced hardware recorder (Annex-B raw stream or MP4 mux).")
         .def(py::init([](const std::string& filepath,
                          const std::string& codec,
                          const std::string& container,
                          int quality,
                          const std::string& rc_mode,
                          int fps,
-                         bool mp4_faststart) {
-            return std::make_unique<VencRecorder>(filepath, parse_venc_codec(codec),
-                                                  parse_venc_container(container), quality,
-                                                  rc_mode, fps, mp4_faststart);
+                         bool mp4_faststart,
+                         int mpp_channel,
+                         const std::string& timestamp_mode) {
+            return std::make_unique<MppRecorder>(filepath, parse_mpp_codec(codec),
+                                                  parse_mpp_container(container), quality,
+                                                  rc_mode, fps, mp4_faststart, mpp_channel,
+                                                  timestamp_mode);
         }), "filepath"_a, "codec"_a = "h264", "container"_a = "mp4",
             "quality"_a = 75, "rc_mode"_a = "cbr", "fps"_a = 30, "mp4_faststart"_a = true,
+            "mpp_channel"_a = -1, "timestamp_mode"_a = "fixed",
             "Creates a hardware recorder.\n\n"
             "Args:\n"
             "    filepath (str): Output path.\n"
@@ -107,25 +134,35 @@ void bind_streaming(py::module_& m) {
             "    quality (int): 1-100.\n"
             "    rc_mode (str): 'cbr'|'vbr'.\n"
             "    fps (int): target fps (1-120).\n"
-            "    mp4_faststart (bool): write moov before mdat (faster start).")
-        .def("write", &VencRecorder::write, "img"_a,
+            "    mp4_faststart (bool): write moov before mdat (faster start).\n"
+            "    mpp_channel (int): Advanced hardware encoder channel override. -1 auto-allocates.\n"
+            "    timestamp_mode (str): 'fixed' uses fps-derived CFR timestamps; 'wallclock' uses actual write() time for VFR MP4.")
+        .def("write", &MppRecorder::write, "img"_a,
              py::call_guard<py::gil_scoped_release>(),
              "Encodes and writes one frame.")
-        .def("close", &VencRecorder::close,
+        .def("close", &MppRecorder::close,
              py::call_guard<py::gil_scoped_release>(),
              "Closes and finalizes the output file (required for MP4).")
-        .def("is_open", &VencRecorder::is_open,
-             "Returns True if recorder is open.")
-        .def("path", &VencRecorder::path,
-             "Returns output filepath.");
+        .def("is_open", &MppRecorder::is_open,
+             "Returns True after the output has been opened by the first write().")
+        .def("path", &MppRecorder::path,
+             "Returns output filepath.")
+        .def("get_mpp_channel", &MppRecorder::get_mpp_channel,
+             "Advanced: returns the hardware encoder channel used by this recorder.");
 
-    // For ImageBuffer.save_venc_h26x(container='mp4') implicit writers / 用于 图像缓冲区.save_venc_h26x(container='mp4') implicit writers
-    m.def("close_venc_recorder", &close_venc_recorder, "filepath"_a,
+    // Cached MP4 writers used by ImageBuffer.save_video() and advanced save_mpp_* calls.
+    m.def("close_mpp_recorder", &close_mpp_recorder, "filepath"_a,
           py::call_guard<py::gil_scoped_release>(),
           "Closes a cached MP4 writer for filepath (finalize MP4).");
-    m.def("close_all_venc_recorders", &close_all_venc_recorders,
+    m.def("close_all_mpp_recorders", &close_all_mpp_recorders,
           py::call_guard<py::gil_scoped_release>(),
           "Closes all cached MP4 writers (finalize MP4).");
+    m.def("close_video", &close_video, "filepath"_a,
+          py::call_guard<py::gil_scoped_release>(),
+          "Finalizes a video file opened implicitly by ImageBuffer.save_video().");
+    m.def("close_all_videos", &close_all_videos,
+          py::call_guard<py::gil_scoped_release>(),
+          "Finalizes all video files opened implicitly by ImageBuffer.save_video().");
 
     py::class_<DisplayHTTPFLV>(m, "DisplayHTTPFLV",
         "HTTP-FLV live streamer: H264/H265 video over HTTP.\n"
@@ -153,7 +190,7 @@ void bind_streaming(py::module_& m) {
              "Stops the server.")
         .def("display", &DisplayHTTPFLV::display, "img"_a,
              py::call_guard<py::gil_scoped_release>(),
-             "Encodes and pushes one frame to all connected viewers.")
+             "Updates the latest frame cache. A background encoder pushes HTTP-FLV at the configured FPS.")
         .def("is_running", &DisplayHTTPFLV::is_running,
              "Returns True if server is running.")
         .def("set_fps", &DisplayHTTPFLV::set_fps, "fps"_a,

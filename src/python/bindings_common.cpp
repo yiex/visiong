@@ -145,24 +145,24 @@ DisplayRTSP::RcMode parse_rtsp_rc_mode(const std::string& rc_mode_str) {
     throw std::invalid_argument("Invalid rc_mode. Use 'cbr' or 'vbr'.");
 }
 
-VencRecorder::Codec parse_venc_codec(const std::string& codec_str) {
+MppRecorder::Codec parse_mpp_codec(const std::string& codec_str) {
     const std::string codec = normalize_token(codec_str);
     if (is_h264_alias(codec)) {
-        return VencRecorder::Codec::H264;
+        return MppRecorder::Codec::H264;
     }
     if (is_h265_alias(codec)) {
-        return VencRecorder::Codec::H265;
+        return MppRecorder::Codec::H265;
     }
     throw std::invalid_argument("Invalid codec. Use 'h264' or 'h265'.");
 }
 
-VencRecorder::Container parse_venc_container(const std::string& container_str) {
+MppRecorder::Container parse_mpp_container(const std::string& container_str) {
     const std::string container = normalize_token(container_str);
     if (container == "mp4") {
-        return VencRecorder::Container::MP4;
+        return MppRecorder::Container::MP4;
     }
     if (container == "annexb" || container == "raw" || container == "h264" || container == "h265") {
-        return VencRecorder::Container::ANNEXB;
+        return MppRecorder::Container::ANNEXB;
     }
     throw std::invalid_argument("Invalid container. Use 'mp4' or 'annexb'.");
 }
