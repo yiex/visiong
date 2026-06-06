@@ -21,8 +21,8 @@ struct DisplaySPIConfig {
     uint32_t source_clock_hz = 200000000;
     uint8_t spi_mode = 0;
     uint8_t bits_per_word = 8;
-    std::string dc_pin = "GPIO1_C5";
-    std::string reset_pin = "GPIO1_C4";
+    std::string dc_pin = "GPIO1_C3";
+    std::string reset_pin = "GPIO1_C2";
     std::string backlight_pin;
     bool bgr = false;
     bool invert = false;
@@ -68,7 +68,24 @@ public:
     bool display(ImageBuffer&& img_buf) override;
     bool display(const ImageBuffer& img_buf, const std::tuple<int, int, int, int>& roi) override;
     bool display(ImageBuffer&& img_buf, const std::tuple<int, int, int, int>& roi) override;
+    bool display_area(const ImageBuffer& img_buf, int x, int y);
+    bool display_area(const ImageBuffer& img_buf, int x, int y, const std::tuple<int, int, int, int>& roi);
+    bool display_area(ImageBuffer&& img_buf, int x, int y);
+    bool display_area(ImageBuffer&& img_buf, int x, int y, const std::tuple<int, int, int, int>& roi);
     void clear(uint16_t color_rgb565 = 0) override;
+    bool draw_rgb565(int x,
+                     int y,
+                     int w,
+                     int h,
+                     const void* data,
+                     size_t size_bytes,
+                     size_t stride_bytes = 0,
+                     bool source_is_native_endian = true);
+    bool draw_pixel(int x, int y, uint16_t color_rgb565);
+    bool draw_line(int x0, int y0, int x1, int y1, uint16_t color_rgb565, int thickness = 1);
+    bool draw_rectangle(int x, int y, int w, int h, uint16_t color_rgb565, int thickness = 1, bool fill = false);
+    bool draw_circle(int cx, int cy, int radius, uint16_t color_rgb565, int thickness = 1, bool fill = false);
+    bool draw_cross(int cx, int cy, uint16_t color_rgb565, int size = 5, int thickness = 1);
     void configure_geometry(int width, int height, int rotation_degrees) override;
 
     int get_screen_width() const override;

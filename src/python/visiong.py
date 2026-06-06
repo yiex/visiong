@@ -84,8 +84,9 @@ _ensure_loader_library_path()
 
 _old_flags = sys.getdlopenflags()
 try:
-    if _MODULE_DIR not in sys.path:
-        sys.path.insert(0, _MODULE_DIR)
+    while _MODULE_DIR in sys.path:
+        sys.path.remove(_MODULE_DIR)
+    sys.path.insert(0, _MODULE_DIR)
     sys.setdlopenflags(_RTLD_MODE)
     _preload_vendor_libraries_global()
     _mod = importlib.import_module("_visiong")
@@ -105,6 +106,9 @@ _NativeDisplaySPI = globals().get("DisplaySPI")
 _NativeMppRecorder = globals().get("MppRecorder")
 _SHORT_GPIO_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)_?(?P<group>[A-Da-d])(?P<index>[0-7])(?:_d)?$")
 _GPIO_OFFSET_PIN_PATTERN = re.compile(r"^(?:GPIO)?(?P<bank>\d+)[-:](?P<pin>\d+)$", re.IGNORECASE)
+_DEFAULT_DISPLAY_SPI_PINS = ("4A0", "4A1", "4A5", "4A7")
+_DEFAULT_DISPLAY_SPI_DC_PIN = "GPIO1_C3"
+_DEFAULT_DISPLAY_SPI_RESET_PIN = "GPIO1_C2"
 
 
 def _video_codec_from_path(filepath, codec="auto"):
@@ -304,6 +308,50 @@ def _append_pin_with_role(out, roles, value, role=None):
 def _backend_name(value):
     text = str(value or "auto").strip().lower()
     return text or "auto"
+
+
+def _displayfb_is_any_active():
+    displayfb = globals().get("DisplayFB")
+    check = getattr(displayfb, "is_any_active", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def _rect_tuple(value, name="rectangle"):
+    try:
+        items = tuple(value)
+    except TypeError:
+        raise ValueError(f"{name} must be a 4-tuple") from None
+    if len(items) != 4:
+        raise ValueError(f"{name} must be a 4-tuple")
+    return tuple(int(item) for item in items)
+
+
+def _rgb_component(value):
+    if isinstance(value, float) and 0.0 <= value <= 1.0:
+        value = value * 255.0
+    return max(0, min(255, int(round(value))))
+
+
+def _color_rgb565(color):
+    if isinstance(color, bool):
+        raise ValueError("color must be RGB565 int or an RGB tuple")
+    if isinstance(color, int):
+        if color < 0 or color > 0xFFFF:
+            raise ValueError("RGB565 color integer must be in 0..0xffff")
+        return int(color)
+    try:
+        values = tuple(color)
+    except TypeError:
+        raise ValueError("color must be RGB565 int or an RGB tuple") from None
+    if len(values) < 3:
+        raise ValueError("RGB color tuple must contain at least r, g, b")
+    r, g, b = (_rgb_component(values[0]), _rgb_component(values[1]), _rgb_component(values[2]))
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
 
 _HW_LOAD_WARNED = set()
@@ -1177,8 +1225,8 @@ class DisplaySPI:
         width=240,
         height=320,
         rotation_degrees=90,
-        dc_pin="GPIO1_C5",
-        reset_pin="GPIO1_C4",
+        dc_pin=_DEFAULT_DISPLAY_SPI_DC_PIN,
+        reset_pin=_DEFAULT_DISPLAY_SPI_RESET_PIN,
         backlight_pin="",
         speed_hz=50_000_000,
         baudrate=None,
@@ -1207,6 +1255,8 @@ class DisplaySPI:
     ):
         if _NativeDisplaySPI is None:
             raise RuntimeError("native DisplaySPI backend is unavailable")
+        if _displayfb_is_any_active() and _backend_name(backend) in ("reg", "register", "direct"):
+            raise RuntimeError("DisplaySPI requires DisplayFB.release() first when using the register/direct SPI backend")
         if baudrate is not None:
             speed_hz = baudrate
 
@@ -1230,7 +1280,12 @@ class DisplaySPI:
         if spi is not None and any(value is not None for value in (clk, sck, mosi, miso, cs, pins)):
             raise ValueError("DisplaySPI accepts either spi= or SPI pin arguments, not both")
 
-        if spi is None and (values or pins is not None or any(value is not None for value in (clk, sck, mosi, miso, cs))):
+        pin_args_supplied = values or pins is not None or any(value is not None for value in (clk, sck, mosi, miso, cs))
+        if spi is None and spi_bus is None and not pin_args_supplied:
+            values = list(_DEFAULT_DISPLAY_SPI_PINS)
+            pin_args_supplied = True
+
+        if spi is None and pin_args_supplied:
             spi_args = values
             self._spi = SPI(
                 *spi_args,
@@ -1245,8 +1300,8 @@ class DisplaySPI:
                 cs=cs,
                 pins=pins,
                 chip_select=chip_select,
-                bind=bind,
-                backend=backend,
+                bind=False,
+                backend="reg",
                 source_clock_hz=source_clock_hz,
                 dummy=dummy,
             )
@@ -1261,7 +1316,9 @@ class DisplaySPI:
             if backend == "auto" and getattr(self._spi, "_reg_backend", False):
                 backend = "reg"
 
-        spi_bus = _normalize_spi_bus(spi_bus) or "/dev/spidev0.0"
+        spi_bus = _normalize_spi_bus(spi_bus)
+        if spi_bus is None:
+            raise ValueError("DisplaySPI requires spi=, SPI pins, or spi_bus")
         dc_pin = _pin_name(dc_pin) if dc_pin else ""
         reset_pin = _pin_name(reset_pin) if reset_pin else ""
         backlight_pin = _pin_name(backlight_pin) if backlight_pin else ""
@@ -1304,8 +1361,87 @@ class DisplaySPI:
             raise AttributeError(name)
         return getattr(impl, name)
 
-    def display(self, frame):
-        return self._impl.display(frame)
+    def display(self, frame, roi=None):
+        if roi is None:
+            return self._impl.display(frame)
+        return self._impl.display(frame, _rect_tuple(roi, "roi"))
+
+    def display_area(self, frame, x=0, y=0, roi=None):
+        if roi is None:
+            return self._impl.display_area(frame, int(x), int(y))
+        return self._impl.display_area(frame, int(x), int(y), _rect_tuple(roi, "roi"))
+
+    def draw_rgb565(self, x, y, w, h, data, stride_bytes=0, source_is_native_endian=True):
+        return self._impl.draw_rgb565(
+            int(x),
+            int(y),
+            int(w),
+            int(h),
+            data,
+            0 if stride_bytes is None else int(stride_bytes),
+            bool(source_is_native_endian),
+        )
+
+    def draw_pixel(self, x, y, color=0xFFFF):
+        return self._impl.draw_pixel(int(x), int(y), _color_rgb565(color))
+
+    def draw_line(self, x0, y0, x1, y1, color=0xFFFF, thickness=1):
+        return self._impl.draw_line(int(x0), int(y0), int(x1), int(y1), _color_rgb565(color), int(thickness))
+
+    def draw_rectangle(self, x, y=None, w=None, h=None, color=0xFFFF, thickness=1, fill=False):
+        if isinstance(x, (list, tuple)):
+            rect = _rect_tuple(x, "rectangle")
+            if y is not None:
+                color = y
+            if w is not None:
+                thickness = w
+            if h is not None:
+                fill = h
+            x, y, w, h = rect
+        elif y is None or w is None or h is None:
+            raise TypeError("draw_rectangle() requires x, y, w, h or a rectangle tuple")
+        thickness = int(thickness)
+        if thickness < 0:
+            fill = True
+            thickness = 1
+        return self._impl.draw_rectangle(int(x), int(y), int(w), int(h), _color_rgb565(color), thickness, bool(fill))
+
+    def draw_circle(self, cx, cy, radius, color=0xFFFF, thickness=1, fill=False):
+        thickness = int(thickness)
+        if thickness < 0:
+            fill = True
+            thickness = 1
+        return self._impl.draw_circle(int(cx), int(cy), int(radius), _color_rgb565(color), thickness, bool(fill))
+
+    def draw_cross(self, cx, cy, color=0xFFFF, size=5, thickness=1):
+        return self._impl.draw_cross(int(cx), int(cy), _color_rgb565(color), int(size), int(thickness))
+
+    def clear(self, color=0):
+        return self._impl.clear(_color_rgb565(color))
+
+    def draw(self, *args, **kwargs):
+        if not args:
+            raise TypeError("draw() requires an ImageBuffer or a primitive name")
+        primitive = args[0]
+        if not isinstance(primitive, str):
+            return self.display_area(*args, **kwargs)
+        name = primitive.strip().lower().replace("-", "_")
+        rest = args[1:]
+        if name in ("image", "frame", "buffer", "area", "display_area"):
+            return self.display_area(*rest, **kwargs)
+        if name in ("rgb565", "bitmap", "raw"):
+            return self.draw_rgb565(*rest, **kwargs)
+        if name in ("pixel", "point"):
+            return self.draw_pixel(*rest, **kwargs)
+        if name in ("line",):
+            return self.draw_line(*rest, **kwargs)
+        if name in ("rect", "rectangle", "box"):
+            return self.draw_rectangle(*rest, **kwargs)
+        if name in ("circle",):
+            return self.draw_circle(*rest, **kwargs)
+        if name in ("cross",):
+            return self.draw_cross(*rest, **kwargs)
+        raise ValueError("unknown DisplaySPI draw primitive: " + primitive)
 
     def release(self):
         impl = self._impl

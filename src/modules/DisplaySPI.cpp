@@ -3,6 +3,7 @@
 
 #include "common/internal/dma_alloc.h"
 #include "common/internal/string_utils.h"
+#include "visiong/modules/DisplayFB.h"
 #include "core/internal/logger.h"
 #include "core/internal/rga_utils.h"
 #include "visiong/common/pixel_format.h"
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -59,8 +61,8 @@ constexpr uint8_t kMadctlMv = 0x20;
 constexpr uint8_t kMadctlBgr = 0x08;
 
 constexpr char kDefaultSpiBusPath[] = "/dev/spidev0.0";
-constexpr char kDefaultDcPin[] = "GPIO1_C5";
-constexpr char kDefaultResetPin[] = "GPIO1_C4";
+constexpr char kDefaultDcPin[] = "GPIO1_C3";
+constexpr char kDefaultResetPin[] = "GPIO1_C2";
 constexpr char kDefaultBackend[] = "auto";
 constexpr uint32_t kDefaultSpeedHz = 50000000;
 constexpr uint32_t kDefaultSourceClockHz = 200000000;
@@ -442,6 +444,7 @@ struct DisplaySPI::Impl {
     std::mutex spi_lock;
     std::unique_ptr<visiong::pinmux::Controller> gpio;
     std::vector<uint8_t> transfer_buffer;
+    std::vector<uint8_t> region_transfer_buffer;
 
     std::thread transfer_thread;
     std::mutex transfer_lock;
@@ -1014,6 +1017,12 @@ void open_spi_device(ImplT& impl) {
 
 template <typename ImplT>
 void bind_spidev_and_open_spi_device(ImplT& impl) {
+    if (DisplayFB::is_any_active()) {
+        throw std::runtime_error(
+            "[DisplaySPI] Refusing to rebind SPI to spidev while DisplayFB is active. "
+            "Call DisplayFB.release() first, or pass backend='spidev' for an already exposed free SPI device.");
+    }
+
     if (!parse_spi_bus_name(impl.spi_bus_path, &impl.spi_index, &impl.chip_select)) {
         throw std::invalid_argument("[DisplaySPI] Cannot resolve SPI controller for spidev backend from '" +
                                     impl.spi_bus_path + "'.");
@@ -1092,6 +1101,11 @@ void ensure_register_spi_legacy_maps(ImplT& impl) {
 
 template <typename ImplT>
 void open_register_spi_device(ImplT& impl) {
+    if (DisplayFB::is_any_active()) {
+        throw std::runtime_error(
+            "[DisplaySPI] Cannot use the register SPI backend while DisplayFB is active. "
+            "Call DisplayFB.release() first, or use backend='spidev' with a free SPI device.");
+    }
     if (impl.config.bits_per_word != 8) {
         throw std::invalid_argument("[DisplaySPI] Register SPI backend currently supports 8 bits per word only.");
     }
@@ -1521,6 +1535,7 @@ void start_transfer_worker(ImplT& impl) {
                 if (impl.active_buffer_index == buffer_index) {
                     impl.active_buffer_index = -1;
                 }
+                impl.transfer_cv.notify_all();
             }
         }
     });
@@ -1546,7 +1561,192 @@ void stop_transfer_worker(ImplT& impl) {
         impl.transfer_pending = false;
         impl.pending_buffer_index = -1;
         impl.active_buffer_index = -1;
+        impl.transfer_cv.notify_all();
     }
+}
+
+template <typename ImplT>
+void wait_transfer_idle(ImplT& impl) {
+    if (!impl.config.multi_buffering) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> transfer_guard(impl.transfer_lock);
+    impl.transfer_cv.wait(transfer_guard, [&impl]() {
+        return !impl.transfer_running || (!impl.transfer_pending && impl.active_buffer_index < 0);
+    });
+}
+
+template <typename ImplT>
+bool clip_rect_to_screen(const ImplT& impl, int* x, int* y, int* w, int* h) {
+    if (!x || !y || !w || !h || *w <= 0 || *h <= 0) {
+        return false;
+    }
+    const int x0 = std::max(0, *x);
+    const int y0 = std::max(0, *y);
+    const int x1 = std::min(impl.screen_width, *x + *w);
+    const int y1 = std::min(impl.screen_height, *y + *h);
+    if (x0 >= x1 || y0 >= y1) {
+        return false;
+    }
+    *x = x0;
+    *y = y0;
+    *w = x1 - x0;
+    *h = y1 - y0;
+    return true;
+}
+
+template <typename ImplT>
+void transfer_shadow_region(ImplT& impl, int x, int y, int w, int h) {
+    if (!clip_rect_to_screen(impl, &x, &y, &w, &h)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> spi_guard(impl.spi_lock);
+    if (!impl.initialized || !spi_transport_is_open(impl)) {
+        return;
+    }
+    set_window(impl, x, y, w, h);
+    const size_t screen_stride = static_cast<size_t>(impl.screen_width) * 2;
+    const size_t row_bytes = static_cast<size_t>(w) * 2;
+
+    const uint8_t* first_row = impl.transfer_buffer.data() +
+                               static_cast<size_t>(y) * screen_stride +
+                               static_cast<size_t>(x) * 2;
+    if (w == impl.screen_width) {
+        write_data(impl, first_row, row_bytes * static_cast<size_t>(h));
+        return;
+    }
+    if (h == 1) {
+        write_data(impl, first_row, row_bytes);
+        return;
+    }
+
+    const size_t total_bytes = row_bytes * static_cast<size_t>(h);
+    if (impl.region_transfer_buffer.size() < total_bytes) {
+        impl.region_transfer_buffer.resize(total_bytes);
+    }
+    for (int row = 0; row < h; ++row) {
+        const uint8_t* src = impl.transfer_buffer.data() +
+                             static_cast<size_t>(y + row) * screen_stride +
+                             static_cast<size_t>(x) * 2;
+        std::memcpy(impl.region_transfer_buffer.data() + static_cast<size_t>(row) * row_bytes,
+                    src,
+                    row_bytes);
+    }
+    write_data(impl, impl.region_transfer_buffer.data(), total_bytes);
+}
+
+template <typename ImplT>
+void fill_shadow_rect(ImplT& impl, int x, int y, int w, int h, uint16_t color_rgb565) {
+    if (!clip_rect_to_screen(impl, &x, &y, &w, &h)) {
+        return;
+    }
+    ensure_transfer_buffer(impl);
+
+    const uint8_t hi = static_cast<uint8_t>(color_rgb565 >> 8);
+    const uint8_t lo = static_cast<uint8_t>(color_rgb565 & 0xFF);
+    const size_t stride = static_cast<size_t>(impl.screen_width) * 2;
+    uint8_t* first_row = impl.transfer_buffer.data() +
+                         static_cast<size_t>(y) * stride +
+                         static_cast<size_t>(x) * 2;
+    const size_t row_bytes = static_cast<size_t>(w) * 2;
+    if (hi == lo) {
+        std::memset(first_row, hi, row_bytes);
+    } else {
+        for (int col = 0; col < w; ++col) {
+            first_row[col * 2] = hi;
+            first_row[col * 2 + 1] = lo;
+        }
+    }
+    for (int row = 1; row < h; ++row) {
+        uint8_t* dst = impl.transfer_buffer.data() +
+                       static_cast<size_t>(y + row) * stride +
+                       static_cast<size_t>(x) * 2;
+        std::memcpy(dst, first_row, row_bytes);
+    }
+}
+
+template <typename ImplT>
+void put_shadow_pixel(ImplT& impl, int x, int y, uint16_t color_rgb565) {
+    if (x < 0 || y < 0 || x >= impl.screen_width || y >= impl.screen_height) {
+        return;
+    }
+    ensure_transfer_buffer(impl);
+    uint8_t* dst = impl.transfer_buffer.data() +
+                   (static_cast<size_t>(y) * impl.screen_width + static_cast<size_t>(x)) * 2;
+    dst[0] = static_cast<uint8_t>(color_rgb565 >> 8);
+    dst[1] = static_cast<uint8_t>(color_rgb565 & 0xFF);
+}
+
+template <typename ImplT>
+void put_shadow_thick_pixel(ImplT& impl, int x, int y, uint16_t color_rgb565, int thickness) {
+    thickness = std::max(1, thickness);
+    const int half = thickness / 2;
+    fill_shadow_rect(impl, x - half, y - half, thickness, thickness, color_rgb565);
+}
+
+template <typename ImplT>
+bool copy_rgb565_be_to_shadow(ImplT& impl,
+                              int x,
+                              int y,
+                              int w,
+                              int h,
+                              const uint8_t* src,
+                              size_t src_size,
+                              size_t src_stride,
+                              bool src_native_endian) {
+    if (src == nullptr || w <= 0 || h <= 0) {
+        return false;
+    }
+    if (src_stride == 0) {
+        src_stride = static_cast<size_t>(w) * 2;
+    }
+    if (src_stride < static_cast<size_t>(w) * 2) {
+        throw std::invalid_argument("[DisplaySPI] RGB565 source stride is smaller than row width.");
+    }
+    const size_t needed = src_stride * static_cast<size_t>(h - 1) + static_cast<size_t>(w) * 2;
+    if (src_size < needed) {
+        throw std::invalid_argument("[DisplaySPI] RGB565 source buffer is smaller than requested area.");
+    }
+
+    int src_x = 0;
+    int src_y = 0;
+    if (x < 0) {
+        src_x = -x;
+        w -= src_x;
+        x = 0;
+    }
+    if (y < 0) {
+        src_y = -y;
+        h -= src_y;
+        y = 0;
+    }
+    if (w <= 0 || h <= 0 || x >= impl.screen_width || y >= impl.screen_height) {
+        return false;
+    }
+    w = std::min(w, impl.screen_width - x);
+    h = std::min(h, impl.screen_height - y);
+    if (w <= 0 || h <= 0) {
+        return false;
+    }
+
+    ensure_transfer_buffer(impl);
+    const size_t dst_stride = static_cast<size_t>(impl.screen_width) * 2;
+    const uint8_t* src_base = src + static_cast<size_t>(src_y) * src_stride + static_cast<size_t>(src_x) * 2;
+    uint8_t* dst_base = impl.transfer_buffer.data() +
+                        static_cast<size_t>(y) * dst_stride +
+                        static_cast<size_t>(x) * 2;
+    if (src_native_endian) {
+        rgb565_native_to_be(src_base, dst_base, w, h, static_cast<int>(src_stride), static_cast<int>(dst_stride));
+    } else {
+        for (int row = 0; row < h; ++row) {
+            const uint8_t* src_row = src_base + static_cast<size_t>(row) * src_stride;
+            uint8_t* dst_row = dst_base + static_cast<size_t>(row) * dst_stride;
+            std::memcpy(dst_row, src_row, static_cast<size_t>(w) * 2);
+        }
+    }
+    return true;
 }
 
 template <typename ImplT>
@@ -1667,6 +1867,66 @@ void render_color_to_transfer(ImplT& impl,
                          impl.screen_height,
                          impl.screen_dma->get_wstride() * 2,
                          impl.screen_width * 2);
+}
+
+std::vector<uint8_t> render_roi_to_rgb565_be(const ImageBuffer& image, const RectROI& roi) {
+    if (roi.w <= 0 || roi.h <= 0) {
+        return {};
+    }
+
+    std::vector<uint8_t> out(static_cast<size_t>(roi.w) * roi.h * 2);
+    if (image.format == visiong::kGray8Format) {
+        const uint8_t* src = static_cast<const uint8_t*>(image.get_data()) +
+                             static_cast<size_t>(roi.y) * image.w_stride + roi.x;
+        gray8_to_rgb565_be(src, out.data(), roi.w, roi.h, image.w_stride, roi.w * 2);
+        return out;
+    }
+
+    if (image.format == RK_FMT_RGB565) {
+        const int bytes_per_pixel = 2;
+        const uint8_t* src = static_cast<const uint8_t*>(image.get_data()) +
+                             static_cast<size_t>(roi.y) * image.w_stride * bytes_per_pixel +
+                             static_cast<size_t>(roi.x) * bytes_per_pixel;
+        rgb565_native_to_be(src, out.data(), roi.w, roi.h, image.w_stride * bytes_per_pixel, roi.w * 2);
+        return out;
+    }
+
+    RgaDmaBuffer dst_dma(roi.w, roi.h, RK_FMT_RGB565);
+    const im_rect dst_rect = {0, 0, roi.w, roi.h};
+    const bool can_use_src_zero_copy = image.is_zero_copy() && image.get_dma_fd() >= 0;
+    if (can_use_src_zero_copy) {
+        RgaDmaBuffer src_wrapper(image.get_dma_fd(),
+                                  const_cast<void*>(image.get_data()),
+                                  image.get_size(),
+                                  image.width,
+                                  image.height,
+                                  static_cast<int>(image.format),
+                                  image.w_stride,
+                                  image.h_stride);
+        dma_sync_cpu_to_device(src_wrapper.get_fd());
+        const im_rect src_rect = {roi.x, roi.y, roi.w, roi.h};
+        if (improcess(src_wrapper.get_buffer(), dst_dma.get_buffer(), {}, src_rect, dst_rect, {}, IM_SYNC) !=
+            IM_STATUS_SUCCESS) {
+            throw std::runtime_error("[DisplaySPI] RGA area zero-copy render failed.");
+        }
+    } else {
+        RgaDmaBuffer src_dma(roi.w, roi.h, image.format);
+        copy_roi_to_dma_buffer(image, roi, src_dma);
+        const im_rect src_rect = {0, 0, roi.w, roi.h};
+        if (improcess(src_dma.get_buffer(), dst_dma.get_buffer(), {}, src_rect, dst_rect, {}, IM_SYNC) !=
+            IM_STATUS_SUCCESS) {
+            throw std::runtime_error("[DisplaySPI] RGA area render failed.");
+        }
+    }
+
+    dma_sync_device_to_cpu(dst_dma.get_fd());
+    rgb565_native_to_be(static_cast<const uint8_t*>(dst_dma.get_vir_addr()),
+                         out.data(),
+                         roi.w,
+                         roi.h,
+                         dst_dma.get_wstride() * 2,
+                         roi.w * 2);
+    return out;
 }
 
 template <typename ImplT>
@@ -2069,6 +2329,12 @@ void DisplaySPI::release() {
     m_impl->cached_src_dma.reset();
     m_impl->cached_gray_src_dma.reset();
     m_impl->cached_gray_scaled_dma.reset();
+    m_impl->transfer_buffer.clear();
+    m_impl->transfer_buffer.shrink_to_fit();
+    m_impl->region_transfer_buffer.clear();
+    m_impl->region_transfer_buffer.shrink_to_fit();
+    m_impl->frame_buffers.clear();
+    m_impl->frame_buffers.shrink_to_fit();
     m_impl->gpio.reset();
 }
 
@@ -2123,6 +2389,259 @@ bool DisplaySPI::display(ImageBuffer&& img_buf, const std::tuple<int, int, int, 
     return display(static_cast<const ImageBuffer&>(img_buf), roi);
 }
 
+bool DisplaySPI::display_area(const ImageBuffer& img_buf, int x, int y) {
+    return display_area(img_buf, x, y, std::make_tuple(0, 0, 0, 0));
+}
+
+bool DisplaySPI::display_area(ImageBuffer&& img_buf, int x, int y) {
+    return display_area(static_cast<const ImageBuffer&>(img_buf), x, y, std::make_tuple(0, 0, 0, 0));
+}
+
+bool DisplaySPI::display_area(const ImageBuffer& img_buf,
+                              int x,
+                              int y,
+                              const std::tuple<int, int, int, int>& roi) {
+    if (!img_buf.is_valid()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+
+    try {
+        wait_transfer_idle(*m_impl);
+        const auto [roi_x, roi_y, roi_w, roi_h] = roi;
+        RectROI src_roi = (roi_w <= 0 || roi_h <= 0) ? RectROI{0, 0, img_buf.width, img_buf.height}
+                                                      : RectROI{roi_x, roi_y, roi_w, roi_h};
+        src_roi = clamp_and_align_roi(src_roi, img_buf);
+
+        if (x < 0) {
+            const int crop = std::min(src_roi.w, -x);
+            src_roi.x += crop;
+            src_roi.w -= crop;
+            x = 0;
+        }
+        if (y < 0) {
+            const int crop = std::min(src_roi.h, -y);
+            src_roi.y += crop;
+            src_roi.h -= crop;
+            y = 0;
+        }
+        if (src_roi.w <= 0 || src_roi.h <= 0 || x >= m_impl->screen_width || y >= m_impl->screen_height) {
+            return true;
+        }
+        src_roi.w = std::min(src_roi.w, m_impl->screen_width - x);
+        src_roi.h = std::min(src_roi.h, m_impl->screen_height - y);
+        if (src_roi.w <= 0 || src_roi.h <= 0) {
+            return true;
+        }
+
+        const std::vector<uint8_t> pixels = render_roi_to_rgb565_be(img_buf, src_roi);
+        if (!copy_rgb565_be_to_shadow(*m_impl,
+                                      x,
+                                      y,
+                                      src_roi.w,
+                                      src_roi.h,
+                                      pixels.data(),
+                                      pixels.size(),
+                                      static_cast<size_t>(src_roi.w) * 2,
+                                      false)) {
+            return true;
+        }
+        transfer_shadow_region(*m_impl, x, y, src_roi.w, src_roi.h);
+        return true;
+    } catch (const std::exception& e) {
+        VISIONG_LOG_ERROR("DisplaySPI", "Display area failed: " << e.what());
+        return false;
+    }
+}
+
+bool DisplaySPI::display_area(ImageBuffer&& img_buf,
+                              int x,
+                              int y,
+                              const std::tuple<int, int, int, int>& roi) {
+    return display_area(static_cast<const ImageBuffer&>(img_buf), x, y, roi);
+}
+
+bool DisplaySPI::draw_rgb565(int x,
+                             int y,
+                             int w,
+                             int h,
+                             const void* data,
+                             size_t size_bytes,
+                             size_t stride_bytes,
+                             bool source_is_native_endian) {
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+
+    try {
+        wait_transfer_idle(*m_impl);
+        const int original_x = x;
+        const int original_y = y;
+        const bool copied = copy_rgb565_be_to_shadow(*m_impl,
+                                                     x,
+                                                     y,
+                                                     w,
+                                                     h,
+                                                     static_cast<const uint8_t*>(data),
+                                                     size_bytes,
+                                                     stride_bytes,
+                                                     source_is_native_endian);
+        if (!copied) {
+            return true;
+        }
+
+        if (original_x < 0) {
+            w += original_x;
+            x = 0;
+        }
+        if (original_y < 0) {
+            h += original_y;
+            y = 0;
+        }
+        w = std::min(w, m_impl->screen_width - x);
+        h = std::min(h, m_impl->screen_height - y);
+        transfer_shadow_region(*m_impl, x, y, w, h);
+        return true;
+    } catch (const std::exception& e) {
+        VISIONG_LOG_ERROR("DisplaySPI", "draw_rgb565 failed: " << e.what());
+        return false;
+    }
+}
+
+bool DisplaySPI::draw_pixel(int x, int y, uint16_t color_rgb565) {
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+    wait_transfer_idle(*m_impl);
+    put_shadow_pixel(*m_impl, x, y, color_rgb565);
+    transfer_shadow_region(*m_impl, x, y, 1, 1);
+    return true;
+}
+
+bool DisplaySPI::draw_line(int x0, int y0, int x1, int y1, uint16_t color_rgb565, int thickness) {
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+    wait_transfer_idle(*m_impl);
+    ensure_transfer_buffer(*m_impl);
+
+    thickness = std::max(1, thickness);
+    const int dirty_x0 = std::min(x0, x1) - thickness;
+    const int dirty_y0 = std::min(y0, y1) - thickness;
+    const int dirty_x1 = std::max(x0, x1) + thickness;
+    const int dirty_y1 = std::max(y0, y1) + thickness;
+
+    int dx = std::abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        put_shadow_thick_pixel(*m_impl, x0, y0, color_rgb565, thickness);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        const int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+    transfer_shadow_region(*m_impl, dirty_x0, dirty_y0, dirty_x1 - dirty_x0 + 1, dirty_y1 - dirty_y0 + 1);
+    return true;
+}
+
+bool DisplaySPI::draw_rectangle(int x,
+                                int y,
+                                int w,
+                                int h,
+                                uint16_t color_rgb565,
+                                int thickness,
+                                bool fill) {
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+    wait_transfer_idle(*m_impl);
+    ensure_transfer_buffer(*m_impl);
+    if (w <= 0 || h <= 0) {
+        return true;
+    }
+    thickness = std::max(1, thickness);
+
+    if (fill) {
+        fill_shadow_rect(*m_impl, x, y, w, h, color_rgb565);
+    } else {
+        const int t = std::min(thickness, std::min(w, h));
+        fill_shadow_rect(*m_impl, x, y, w, t, color_rgb565);
+        fill_shadow_rect(*m_impl, x, y + h - t, w, t, color_rgb565);
+        fill_shadow_rect(*m_impl, x, y, t, h, color_rgb565);
+        fill_shadow_rect(*m_impl, x + w - t, y, t, h, color_rgb565);
+    }
+    transfer_shadow_region(*m_impl, x, y, w, h);
+    return true;
+}
+
+bool DisplaySPI::draw_circle(int cx, int cy, int radius, uint16_t color_rgb565, int thickness, bool fill) {
+    std::lock_guard<std::mutex> guard(m_impl->lock);
+    if (!m_impl->initialized || !spi_transport_is_open(*m_impl)) {
+        return false;
+    }
+    wait_transfer_idle(*m_impl);
+    ensure_transfer_buffer(*m_impl);
+    if (radius <= 0) {
+        return true;
+    }
+    thickness = std::max(1, thickness);
+
+    if (fill) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            const int row_half = static_cast<int>(std::sqrt(static_cast<double>(radius * radius - dy * dy)));
+            fill_shadow_rect(*m_impl, cx - row_half, cy + dy, row_half * 2 + 1, 1, color_rgb565);
+        }
+    } else {
+        const int inner = std::max(0, radius - thickness + 1);
+        for (int dy = -radius; dy <= radius; ++dy) {
+            const int outer_half = static_cast<int>(std::sqrt(static_cast<double>(radius * radius - dy * dy)));
+            int inner_half = -1;
+            if (inner > 0 && std::abs(dy) <= inner) {
+                inner_half = static_cast<int>(std::sqrt(static_cast<double>(inner * inner - dy * dy)));
+            }
+            if (inner_half < 0) {
+                fill_shadow_rect(*m_impl, cx - outer_half, cy + dy, outer_half * 2 + 1, 1, color_rgb565);
+            } else {
+                fill_shadow_rect(*m_impl, cx - outer_half, cy + dy, outer_half - inner_half, 1, color_rgb565);
+                fill_shadow_rect(*m_impl, cx + inner_half + 1, cy + dy, outer_half - inner_half, 1, color_rgb565);
+            }
+        }
+    }
+    transfer_shadow_region(*m_impl,
+                           cx - radius - thickness,
+                           cy - radius - thickness,
+                           radius * 2 + thickness * 2 + 1,
+                           radius * 2 + thickness * 2 + 1);
+    return true;
+}
+
+bool DisplaySPI::draw_cross(int cx, int cy, uint16_t color_rgb565, int size, int thickness) {
+    size = std::max(1, size);
+    const int half = size / 2;
+    const bool h_ok = draw_line(cx - half, cy, cx + half, cy, color_rgb565, thickness);
+    const bool v_ok = draw_line(cx, cy - half, cx, cy + half, color_rgb565, thickness);
+    return h_ok && v_ok;
+}
+
 void DisplaySPI::clear(uint16_t color_rgb565) {
     std::lock_guard<std::mutex> guard(m_impl->lock);
     if (!spi_transport_is_open(*m_impl)) {
@@ -2154,9 +2673,19 @@ void DisplaySPI::configure_geometry(int width, int height, int rotation_degrees)
         m_impl->screen_width = logical_width_for(m_impl->config);
         m_impl->screen_height = logical_height_for(m_impl->config);
         ensure_transfer_buffer(*m_impl);
+        m_impl->region_transfer_buffer.clear();
+        m_impl->region_transfer_buffer.shrink_to_fit();
         {
             std::lock_guard<std::mutex> transfer_guard(m_impl->transfer_lock);
-            ensure_frame_buffers(*m_impl);
+            if (m_impl->config.multi_buffering) {
+                ensure_frame_buffers(*m_impl);
+            } else {
+                m_impl->frame_buffers.clear();
+                m_impl->frame_buffers.shrink_to_fit();
+                m_impl->transfer_pending = false;
+                m_impl->pending_buffer_index = -1;
+                m_impl->active_buffer_index = -1;
+            }
         }
         m_impl->screen_dma.reset();
         m_impl->cached_src_dma.reset();

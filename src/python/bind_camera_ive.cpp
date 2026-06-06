@@ -3,13 +3,14 @@
 
 void bind_camera(py::module_& m) {
     py::class_<Camera>(m, "Camera")
-        .def(py::init<int, int, const std::string&, bool, const std::string&>(),
+        .def(py::init<int, int, const std::string&, bool, const std::string&, const std::string&>(),
              "target_width"_a,
              "target_height"_a,
              "format"_a = "yuv",
              "hdr"_a = false,
              "crop_mode"_a = "auto",
-             "Constructor. format defaults to 'yuv'. Supported values: 'bgr', 'rgb', 'yuv'/'yuv420', or 'gray'. crop_mode: 'auto' (default, follows the camera max-resolution aspect ratio), 'off', or any ratio such as '16:9', '4:3', '1:1', or '3:2'.\n构造函数。format 默认值为 'yuv'。可选值包括 'bgr'、'rgb'、'yuv'/'yuv420' 和 'gray'。crop_mode 可为默认的 'auto'（跟随摄像头最大分辨率比例）、'off'，或任意比例字符串，例如 '16:9'、'4:3'、'1:1'、'3:2'。")
+             "isp_path"_a = "auto",
+             "Create a camera stream. format: yuv, rgb, bgr, or gray. isp_path: auto, main, self, bypass, or /dev/videoN.")
         .def(py::init<>())
         .def("init",
              &Camera::init,
@@ -18,38 +19,81 @@ void bind_camera(py::module_& m) {
              "format"_a = "yuv",
              "hdr"_a = false,
              "crop_mode"_a = "auto",
+             "isp_path"_a = "auto",
              py::call_guard<py::gil_scoped_release>(),
-             "Initializes the camera. format defaults to 'yuv'. Supported values: 'bgr', 'rgb', 'yuv'/'yuv420', or 'gray'. crop_mode: 'auto' (default, follows the camera max-resolution aspect ratio), 'off', or any ratio such as '16:9', '4:3', '1:1', or '3:2'.\n初始化摄像头。format 默认值为 'yuv'。可选值包括 'bgr'、'rgb'、'yuv'/'yuv420' 和 'gray'。crop_mode 可为默认的 'auto'（跟随摄像头最大分辨率比例）、'off'，或任意比例字符串，例如 '16:9'、'4:3'、'1:1'、'3:2'。")
-                .def("skip", &Camera::skip, "num_frames"_a = 10,
+             "Initialize the camera stream.")
+        .def("skip", &Camera::skip, "num_frames"_a = 10,
              py::call_guard<py::gil_scoped_release>(),
-             R"(Reads and discards a specified number of frames from the camera.
-
-             This is highly recommended after initializing the camera to allow the ISP's
-             auto exposure, auto white balance, and other algorithms to stabilize
-             before you start processing actual frames.
-
-             Args:
-                 num_frames (int): The number of frames to skip. Defaults to 10,
-                                   which is a reasonable value for most sensors.
-             )")
+             "Reads and discards warmup frames.")
         .def("snapshot", &Camera::snapshot, py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
              "Captures a single frame from the camera and returns an ImageBuffer.")
+        .def("sub", &Camera::sub,
+             "target_width"_a = 640,
+             "target_height"_a = 360,
+             "format"_a = "auto",
+             "crop_mode"_a = "auto",
+             "isp_path"_a = "auto",
+             py::return_value_policy::reference_internal,
+             "Configures a secondary camera stream and returns self.")
+        .def("snapshots",
+             [](Camera& self) {
+                 std::pair<ImageBuffer, ImageBuffer> frames;
+                 {
+                     py::gil_scoped_release release;
+                     frames = self.snapshots();
+                 }
+                 py::tuple out(2);
+                 out[0] = py::cast(std::move(frames.first), py::return_value_policy::move);
+                 out[1] = py::cast(std::move(frames.second), py::return_value_policy::move);
+                 return out;
+             },
+             "Captures the main stream and configured sub stream as (main, sub).")
+        .def("open_stream", &Camera::open_stream,
+             "target_width"_a = 640,
+             "target_height"_a = 360,
+             "format"_a = "auto",
+             "crop_mode"_a = "auto",
+             "isp_path"_a = "auto",
+             py::return_value_policy::move,
+             "Advanced: opens another ISP output as a regular Camera.")
         .def("release", &Camera::release,
              py::call_guard<py::gil_scoped_release>(),
              "Releases the camera and frees resources. Safe to call even if not initialized.")
+        .def("close", &Camera::release,
+             py::call_guard<py::gil_scoped_release>(),
+             "Alias for release().")
+        .def("has_sub", &Camera::has_sub,
+             "Returns True if a secondary stream is configured.")
+        .def("close_sub", &Camera::close_sub,
+             py::call_guard<py::gil_scoped_release>(),
+             "Closes the configured secondary stream.")
         .def("is_initialized", &Camera::is_initialized,
              "Returns True if the camera has been successfully initialized.")
+        .def("__enter__", [](Camera& self) -> Camera& { return self; },
+             py::return_value_policy::reference_internal)
+        .def("__exit__", [](Camera& self, const py::object&, const py::object&, const py::object&) {
+            self.release();
+            return false;
+        })
         .def_property_readonly("target_width", &Camera::target_width, "Get the user-defined target width.")
         .def_property_readonly("target_height", &Camera::target_height, "Get the user-defined target height.")
         .def_property_readonly("actual_width", &Camera::actual_width, "Get the actual hardware capture width after alignment.")
         .def_property_readonly("actual_height", &Camera::actual_height, "Get the actual hardware capture height after alignment.")
         .def_property_readonly("crop_mode", &Camera::get_crop_mode,
-                               "Get the active crop mode. Returns 'off', a requested ratio like '1:1' or '3:2', or an auto-derived label such as 'auto(16:9)'.\n获取当前生效的裁切模式，可能是 'off'、用户指定比例（如 '1:1'、'3:2'）或自动推导标签（如 'auto(16:9)'）。")
+                               "Get the active crop mode.")
         .def("get_capture_width", &Camera::get_capture_width,
              "Returns the actual capture width (alias for actual_width).")
         .def("get_capture_height", &Camera::get_capture_height,
              "Returns the actual capture height (alias for actual_height).")
+        .def_property_readonly("format", &Camera::get_format,
+                               "Get the normalized output format token.")
+        .def_property_readonly("hdr_enabled", &Camera::is_hdr_enabled,
+                               "Returns True if HDR mode is enabled.")
+        .def_property_readonly("isp_path", &Camera::get_isp_path,
+                               "Get the selected ISP output path label.")
+        .def_property_readonly("device_path", &Camera::get_device_path,
+                               "Get the selected V4L2 device path.")
     	.def("set_saturation", &Camera::set_saturation, "value"_a,
              "Sets the image saturation. Range: [0, 255]. Raises ValueError on invalid input.")
     	.def("set_contrast", &Camera::set_contrast, "value"_a,

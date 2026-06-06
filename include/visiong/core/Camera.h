@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "visiong/core/ImageBuffer.h"
 
@@ -15,7 +16,8 @@ public:
            int target_height,
            const std::string& format = "yuv",
            bool hdr_enabled = false,
-           const std::string& crop_mode = "auto");
+           const std::string& crop_mode = "auto",
+           const std::string& isp_path = "auto");
     Camera();
     ~Camera();
 
@@ -28,8 +30,22 @@ public:
               int target_height,
               const std::string& format = "yuv",
               bool hdr_enabled = false,
-              const std::string& crop_mode = "auto");
+              const std::string& crop_mode = "auto",
+              const std::string& isp_path = "auto");
     ImageBuffer snapshot();
+    Camera& sub(int target_width = 640,
+                int target_height = 360,
+                const std::string& format = "auto",
+                const std::string& crop_mode = "auto",
+                const std::string& isp_path = "auto");
+    std::pair<ImageBuffer, ImageBuffer> snapshots();
+    std::unique_ptr<Camera> open_stream(int target_width = 640,
+                                        int target_height = 360,
+                                        const std::string& format = "auto",
+                                        const std::string& crop_mode = "auto",
+                                        const std::string& isp_path = "auto");
+    bool has_sub() const;
+    void close_sub();
     void skip_frames(int num_frames);
     void skip(int num_frames = 10) { skip_frames(num_frames); }
     void release();
@@ -45,6 +61,14 @@ public:
     int actual_height() const { return get_actual_capture_height(); }
     std::string get_crop_mode() const;
     std::string crop_mode() const { return get_crop_mode(); }
+    std::string get_format() const;
+    std::string format() const { return get_format(); }
+    bool is_hdr_enabled() const;
+    bool hdr_enabled() const { return is_hdr_enabled(); }
+    std::string get_isp_path() const;
+    std::string isp_path() const { return get_isp_path(); }
+    std::string get_device_path() const;
+    std::string device_path() const { return get_device_path(); }
 
     int get_capture_width() const { return get_actual_capture_width(); }
     int get_capture_height() const { return get_actual_capture_height(); }

@@ -32,6 +32,7 @@ public:
     int get_screen_height() const;
     int screen_width() const { return get_screen_width(); }
     int screen_height() const { return get_screen_height(); }
+    static bool is_any_active();
 
 private:
     void display_thread_func();

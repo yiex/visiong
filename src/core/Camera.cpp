@@ -24,6 +24,7 @@
 #include <limits>
 #include <numeric>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <mutex>
@@ -99,12 +100,115 @@ struct CameraResolutionCaps {
     }
 };
 
+struct CameraIspPath {
+    std::string label = "main";
+    std::string device_path = "/dev/video11";
+};
+
+std::string trim_copy(const std::string& value);
+
+CameraCropMode parse_camera_crop_mode(const std::string& crop_mode);
+CameraCropMode resolve_camera_crop_mode(const CameraCropMode& requested_mode,
+                                        const CameraResolutionCaps& sensor_caps);
+CameraResolutionCaps probe_camera_resolution_caps(const char* devpath);
+CameraResolutionCaps probe_camera_system_resolution_caps();
+
 struct CameraGeometryPlan {
     int target_width = 0;
     int target_height = 0;
     int capture_width = 0;
     int capture_height = 0;
 };
+
+CameraGeometryPlan build_camera_geometry_plan(int user_width,
+                                              int user_height,
+                                              const CameraCropMode& crop_mode,
+                                              const CameraResolutionCaps& sensor_caps);
+
+CameraIspPath resolve_camera_isp_path(const std::string& requested_path) {
+    std::string key = visiong::to_lower_copy(trim_copy(requested_path));
+    if (key.empty() || key == "default" || key == "auto") {
+        key = "main";
+    }
+
+    if (key.rfind("/dev/video", 0) == 0) {
+        return {key, key};
+    }
+    if (key == "main" || key == "mainpath" || key == "rkisp_mainpath" || key == "0") {
+        return {"main", "/dev/video11"};
+    }
+    if (key == "self" || key == "sub" || key == "selfpath" || key == "rkisp_selfpath" || key == "1") {
+        return {"self", "/dev/video12"};
+    }
+    if (key == "bypass" || key == "bypasspath" || key == "rkisp_bypasspath" || key == "2") {
+        return {"bypass", "/dev/video13"};
+    }
+    if (key == "main4x4" || key == "main_4x4" || key == "mainpath_4x4" ||
+        key == "rkisp_mainpath_4x4sampling") {
+        return {"main4x4", "/dev/video14"};
+    }
+    if (key == "bypass4x4" || key == "bypass_4x4" || key == "bypasspath_4x4" ||
+        key == "rkisp_bypasspath_4x4sampling") {
+        return {"bypass4x4", "/dev/video15"};
+    }
+    if (key == "luma" || key == "lumapath" || key == "rkisp_lumapath") {
+        return {"luma", "/dev/video16"};
+    }
+
+    throw std::invalid_argument("Invalid isp_path '" + requested_path +
+                                "'. Use 'main', 'self', 'bypass', 'main4x4', 'bypass4x4', "
+                                "'luma', or an explicit /dev/videoN path.");
+}
+
+std::string choose_camera_isp_path(int target_width,
+                                   int target_height,
+                                   const std::string& crop_mode,
+                                   const std::string& requested_path,
+                                   const std::string& excluded_device_path = std::string()) {
+    const std::string requested_key = visiong::to_lower_copy(trim_copy(requested_path));
+    if (!requested_key.empty() && requested_key != "auto" && requested_key != "default") {
+        return requested_path;
+    }
+
+    const CameraCropMode requested_crop_mode =
+        parse_camera_crop_mode(crop_mode.empty() ? std::string("auto") : crop_mode);
+    const std::array<std::string, 3> candidates = {"self", "bypass", "main"};
+    std::string best_path;
+    std::string unknown_fallback_path;
+    long long best_area = std::numeric_limits<long long>::max();
+
+    for (const auto& candidate : candidates) {
+        const CameraIspPath resolved = resolve_camera_isp_path(candidate);
+        if (!excluded_device_path.empty() && resolved.device_path == excluded_device_path) {
+            continue;
+        }
+        const CameraResolutionCaps caps = probe_camera_resolution_caps(resolved.device_path.c_str());
+        if (!caps.is_valid()) {
+            if (unknown_fallback_path.empty()) {
+                unknown_fallback_path = candidate;
+            }
+            continue;
+        }
+        const CameraCropMode resolved_crop_mode = resolve_camera_crop_mode(requested_crop_mode, caps);
+        try {
+            (void)build_camera_geometry_plan(target_width, target_height, resolved_crop_mode, caps);
+            const long long area = static_cast<long long>(caps.max_width) * caps.max_height;
+            if (area < best_area) {
+                best_area = area;
+                best_path = candidate;
+            }
+        } catch (const std::exception&) {
+        }
+    }
+
+    if (!best_path.empty()) {
+        return best_path;
+    }
+    if (!excluded_device_path.empty() && !unknown_fallback_path.empty()) {
+        return unknown_fallback_path;
+    }
+    return excluded_device_path.empty() ? std::string("main") : std::string("self");
+}
 
 int align_up(int value, int alignment) {
     if (alignment <= 0) {
@@ -447,6 +551,24 @@ CameraResolutionCaps probe_camera_resolution_caps(const char* devpath) {
     return caps;
 }
 
+CameraResolutionCaps probe_camera_system_resolution_caps() {
+    CameraResolutionCaps best_caps;
+    const std::array<std::string, 3> candidates = {"main", "self", "bypass"};
+    for (const auto& candidate : candidates) {
+        const CameraIspPath resolved = resolve_camera_isp_path(candidate);
+        const CameraResolutionCaps caps = probe_camera_resolution_caps(resolved.device_path.c_str());
+        if (!caps.is_valid()) {
+            continue;
+        }
+        if (!best_caps.is_valid() ||
+            static_cast<long long>(caps.max_width) * caps.max_height >
+                static_cast<long long>(best_caps.max_width) * best_caps.max_height) {
+            best_caps = caps;
+        }
+    }
+    return best_caps;
+}
+
 [[noreturn]] void throw_camera_geometry_limit_error(int requested_width,
                                                     int requested_height,
                                                     int aligned_width,
@@ -513,12 +635,141 @@ bool visiong_init_sys_if_needed() {
     return true;
 }
 
+namespace {
+
+struct SharedAiqState {
+    std::mutex mutex;
+    rk_aiq_sys_ctx_t* ctx = nullptr;
+    int ref_count = 0;
+    bool prepared = false;
+    bool started = false;
+    int prepare_width = 0;
+    int prepare_height = 0;
+    rk_aiq_working_mode_t wdr_mode = RK_AIQ_WORKING_MODE_NORMAL;
+};
+
+SharedAiqState g_shared_aiq;
+
+void reset_shared_aiq_state_locked() {
+    g_shared_aiq.ctx = nullptr;
+    g_shared_aiq.ref_count = 0;
+    g_shared_aiq.prepared = false;
+    g_shared_aiq.started = false;
+    g_shared_aiq.prepare_width = 0;
+    g_shared_aiq.prepare_height = 0;
+    g_shared_aiq.wdr_mode = RK_AIQ_WORKING_MODE_NORMAL;
+}
+
+class SharedAiqLease {
+  public:
+    explicit SharedAiqLease(rk_aiq_sys_ctx_t* ctx) : m_ctx(ctx) {}
+    ~SharedAiqLease() {
+        std::lock_guard<std::mutex> lock(g_shared_aiq.mutex);
+        if (g_shared_aiq.ref_count > 0) {
+            --g_shared_aiq.ref_count;
+        }
+        if (g_shared_aiq.ref_count == 0 && g_shared_aiq.ctx) {
+            if (g_shared_aiq.started) {
+                rk_aiq_uapi2_sysctl_stop(g_shared_aiq.ctx, false);
+            }
+            rk_aiq_uapi2_sysctl_deinit(g_shared_aiq.ctx);
+            reset_shared_aiq_state_locked();
+        }
+    }
+
+    SharedAiqLease(const SharedAiqLease&) = delete;
+    SharedAiqLease& operator=(const SharedAiqLease&) = delete;
+
+    rk_aiq_sys_ctx_t* get() const { return m_ctx; }
+
+    int start_if_needed() {
+        std::lock_guard<std::mutex> lock(g_shared_aiq.mutex);
+        if (!g_shared_aiq.ctx || g_shared_aiq.ctx != m_ctx) {
+            return -1;
+        }
+        if (g_shared_aiq.started) {
+            return 0;
+        }
+        if (rk_aiq_uapi2_sysctl_start(g_shared_aiq.ctx) != XCAM_RETURN_NO_ERROR) {
+            fprintf(stderr, "V4L2 Error: rk_aiq_uapi2_sysctl_start failed\n");
+            return -1;
+        }
+        g_shared_aiq.started = true;
+        return 0;
+    }
+
+  private:
+    rk_aiq_sys_ctx_t* m_ctx = nullptr;
+};
+
+std::shared_ptr<SharedAiqLease> acquire_shared_aiq_session(int prepare_width,
+                                                          int prepare_height,
+                                                          const char* iq_file_dir,
+                                                          rk_aiq_working_mode_t wdr_mode) {
+    std::lock_guard<std::mutex> lock(g_shared_aiq.mutex);
+    const int aiq_width = std::max(1, prepare_width);
+    const int aiq_height = std::max(1, prepare_height);
+    if (g_shared_aiq.ctx) {
+        if (g_shared_aiq.wdr_mode != wdr_mode) {
+            throw std::runtime_error("Camera: cannot mix HDR and non-HDR cameras in one ISP session.");
+        }
+        if (aiq_width > g_shared_aiq.prepare_width || aiq_height > g_shared_aiq.prepare_height) {
+            std::ostringstream oss;
+            oss << "Camera: existing ISP session was prepared at "
+                << g_shared_aiq.prepare_width << 'x' << g_shared_aiq.prepare_height
+                << ", but a later camera requested "
+                << aiq_width << 'x' << aiq_height
+                << ". Open the highest-resolution/main ISP path first.";
+            throw std::runtime_error(oss.str());
+        }
+        ++g_shared_aiq.ref_count;
+        return std::make_shared<SharedAiqLease>(g_shared_aiq.ctx);
+    }
+
+    rk_aiq_static_info_t aiq_static_info;
+    memset(&aiq_static_info, 0, sizeof(aiq_static_info));
+    rk_aiq_uapi2_sysctl_enumStaticMetas(0, &aiq_static_info);
+    const char* sns_entity_name = aiq_static_info.sensor_info.sensor_name;
+
+    rk_aiq_sys_ctx_t* ctx = rk_aiq_uapi2_sysctl_init(sns_entity_name, iq_file_dir, nullptr, nullptr);
+    if (!ctx) {
+        throw std::runtime_error("Camera: rk_aiq_uapi2_sysctl_init failed.");
+    }
+
+    const int ret_prepare = rk_aiq_uapi2_sysctl_prepare(ctx, aiq_width, aiq_height, wdr_mode);
+
+    rk_aiq_uapi2_sysctl_setModuleCtl(ctx, (rk_aiq_module_id_t)2, false);
+    rk_aiq_uapi2_sysctl_setModuleCtl(ctx, (rk_aiq_module_id_t)15, false);
+
+    if (ret_prepare != XCAM_RETURN_NO_ERROR) {
+        rk_aiq_uapi2_sysctl_deinit(ctx);
+        throw std::runtime_error("Camera: rk_aiq_uapi2_sysctl_prepare failed.");
+    }
+
+    g_shared_aiq.ctx = ctx;
+    g_shared_aiq.ref_count = 1;
+    g_shared_aiq.prepared = true;
+    g_shared_aiq.started = false;
+    g_shared_aiq.prepare_width = aiq_width;
+    g_shared_aiq.prepare_height = aiq_height;
+    g_shared_aiq.wdr_mode = wdr_mode;
+    return std::make_shared<SharedAiqLease>(ctx);
+}
+
+}  // namespace
+
 class CaptureV4L2Impl {
   public:
     CaptureV4L2Impl();
     ~CaptureV4L2Impl();
 
-    int open_and_prepare(int width, int height, float fps, const char* iq_file_dir,
+    int open_and_prepare(const std::string& device_path,
+                         int width,
+                         int height,
+                         int aiq_prepare_width,
+                         int aiq_prepare_height,
+                         float fps,
+                         const char* iq_file_dir,
                          rk_aiq_working_mode_t wdr_mode);
     int start_streaming();
     int read_frame_to_yuv_buffer(ImageBuffer& frame_out);
@@ -526,9 +777,11 @@ class CaptureV4L2Impl {
     int close();
 
     rk_aiq_sys_ctx_t* aiq_ctx;
-    char devpath[32];
+    std::shared_ptr<SharedAiqLease> aiq_lease;
+    char devpath[64];
     int fd;
     v4l2_buf_type buf_type;
+    bool streaming;
 
     __u32 cap_width;
     __u32 cap_height;
@@ -550,9 +803,22 @@ class CaptureV4L2 {
   public:
     CaptureV4L2() : d(new CaptureV4L2Impl) {}
     ~CaptureV4L2() { delete d; }
-    int open_and_prepare(int width, int height, float fps, const char* iq_file_dir,
+    int open_and_prepare(const std::string& device_path,
+                         int width,
+                         int height,
+                         int aiq_prepare_width,
+                         int aiq_prepare_height,
+                         float fps,
+                         const char* iq_file_dir,
                          rk_aiq_working_mode_t wdr_mode) {
-        return d->open_and_prepare(width, height, fps, iq_file_dir, wdr_mode);
+        return d->open_and_prepare(device_path,
+                                   width,
+                                   height,
+                                   aiq_prepare_width,
+                                   aiq_prepare_height,
+                                   fps,
+                                   iq_file_dir,
+                                   wdr_mode);
     }
     int start_streaming() { return d->start_streaming(); }
     int read_frame_to_yuv_buffer(ImageBuffer& frame_out) { return d->read_frame_to_yuv_buffer(frame_out); }
@@ -561,6 +827,7 @@ class CaptureV4L2 {
     int get_width() const { return d->cap_width; }
     int get_height() const { return d->cap_height; }
     rk_aiq_sys_ctx_t* get_aiq_context() const { return d->aiq_ctx; }
+    std::string get_device_path() const { return d->devpath; }
 
   private:
     CaptureV4L2Impl* const d;
@@ -570,6 +837,7 @@ CaptureV4L2Impl::CaptureV4L2Impl() {
     aiq_ctx = nullptr;
     fd = -1;
     buf_type = (v4l2_buf_type)0;
+    streaming = false;
     cap_width = 0;
     cap_height = 0;
     fd_state = std::make_shared<V4L2FdState>();
@@ -584,35 +852,35 @@ CaptureV4L2Impl::~CaptureV4L2Impl() {
     close();
 }
 
-int CaptureV4L2Impl::open_and_prepare(int width, int height, float fps, const char* iq_file_dir,
+int CaptureV4L2Impl::open_and_prepare(const std::string& device_path,
+                                      int width,
+                                      int height,
+                                      int aiq_prepare_width,
+                                      int aiq_prepare_height,
+                                      float fps,
+                                      const char* iq_file_dir,
                                       rk_aiq_working_mode_t wdr_mode) {
     (void)fps;
     // Declare commonly reused locals early. / 提前声明会重复使用的局部变量。
     v4l2_capability caps;
     v4l2_format fmt;
     v4l2_requestbuffers req;
-    const char* sns_entity_name;
-    rk_aiq_static_info_t aiq_static_info;
-    int ret_prepare;
     unsigned int device_caps = 0;
 
     // 1. AIQ Init / 1. 初始化 AIQ。
-    rk_aiq_uapi2_sysctl_enumStaticMetas(0, &aiq_static_info);
-    sns_entity_name = aiq_static_info.sensor_info.sensor_name;
-
-    aiq_ctx = rk_aiq_uapi2_sysctl_init(sns_entity_name, iq_file_dir, nullptr, nullptr);
-    if (!aiq_ctx) {
+    if (device_path.empty() || device_path.size() >= sizeof(devpath)) {
         // Keep detailed diagnostics on stderr for troubleshooting. / 在 stderr 保留详细诊断信息，便于排障。
-        fprintf(stderr, "V4L2 Error: rk_aiq_uapi2_sysctl_init failed\n");
+        fprintf(stderr, "V4L2 Error: invalid device path '%s'\n", device_path.c_str());
         return -1;
     }
 
     // 2. Open V4L2 Device / 2. 打开 V4L2 设备。
-    strcpy(devpath, "/dev/video11");
+    std::strncpy(devpath, device_path.c_str(), sizeof(devpath) - 1);
+    devpath[sizeof(devpath) - 1] = '\0';
     fd = ::open(devpath, O_RDWR | O_NONBLOCK, 0);
     if (fd < 0) {
         fprintf(stderr, "V4L2 Error: open %s failed %d %s\n", devpath, errno, strerror(errno));
-        goto OUT_AIQ_DEINIT;
+        goto OUT;
     }
     fd_generation = fd_state->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
     fd_state->fd.store(fd, std::memory_order_release);
@@ -649,21 +917,15 @@ int CaptureV4L2Impl::open_and_prepare(int width, int height, float fps, const ch
     }
 
     // 4. AIQ Prepare / 4. 准备 AIQ。
-    ret_prepare = rk_aiq_uapi2_sysctl_prepare(aiq_ctx, cap_width, cap_height, wdr_mode);
-
-    // 4.1 Try to disable AF/Dehaze modules (best effort). / 4.1 尝试关闭 AF/Dehaze 模块（尽力而为）。
-    if (aiq_ctx) {
-        // Explicit cast to module enum IDs: AF=2, Dehaze=15. / 显式转换到模块枚举 ID：AF=2，Dehaze=15。
-        rk_aiq_uapi2_sysctl_setModuleCtl(aiq_ctx, (rk_aiq_module_id_t)2, false);
-        rk_aiq_uapi2_sysctl_setModuleCtl(aiq_ctx, (rk_aiq_module_id_t)15, false);
-    }
-
-    if (ret_prepare != XCAM_RETURN_NO_ERROR) {
-        fprintf(stderr, "V4L2 Error: rk_aiq_uapi2_sysctl_prepare failed\n");
+    try {
+        aiq_lease = acquire_shared_aiq_session(aiq_prepare_width, aiq_prepare_height, iq_file_dir, wdr_mode);
+        aiq_ctx = aiq_lease ? aiq_lease->get() : nullptr;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "V4L2 Error: %s\n", e.what());
         goto OUT;
     }
 
-    // 5. Map Buffers / 5. 映射缓冲区。
+    // 5. Map Buffers.
     buffers.resize(req.count);
     for (unsigned int i = 0; i < req.count; ++i) {
         v4l2_buffer buf;
@@ -702,16 +964,10 @@ int CaptureV4L2Impl::open_and_prepare(int width, int height, float fps, const ch
 OUT:
     close();
     return -1;
-OUT_AIQ_DEINIT:
-    if (aiq_ctx)
-        rk_aiq_uapi2_sysctl_deinit(aiq_ctx);
-    aiq_ctx = nullptr;
-    return -1;
 }
 
 int CaptureV4L2Impl::start_streaming() {
-    if (rk_aiq_uapi2_sysctl_start(aiq_ctx) != XCAM_RETURN_NO_ERROR) {
-        fprintf(stderr, "V4L2 Error: rk_aiq_uapi2_sysctl_start failed\n");
+    if (!aiq_lease || aiq_lease->start_if_needed() != 0) {
         return -1;
     }
 
@@ -734,10 +990,10 @@ int CaptureV4L2Impl::start_streaming() {
 
     if (ioctl(fd, VIDIOC_STREAMON, &buf_type) < 0) {
         fprintf(stderr, "V4L2 Error: ioctl VIDIOC_STREAMON failed: %s\n", strerror(errno));
-        rk_aiq_uapi2_sysctl_stop(aiq_ctx, false);
         return -1;
     }
 
+    streaming = true;
     return 0;
 }
 
@@ -833,7 +1089,7 @@ int CaptureV4L2Impl::read_frame_to_yuv_buffer(ImageBuffer& frame_out) {
             MB_BLK mb_blk = MB_INVALID_HANDLE;
             if (RK_MPI_SYS_CreateMB(&mb_blk, &ext) == 0 && mb_blk != MB_INVALID_HANDLE) {
                 frame_out = ImageBuffer(cap_width, cap_height, RK_FMT_YUV420SP, mb_blk);
-                // Align strides to encoder-friendly boundaries.
+                // Align strides to MPP-friendly boundaries. / 将步幅对齐到更适合 MPP 的边界。
                 frame_out.w_stride = (cap_width + 15) & ~15;
                 frame_out.h_stride = (cap_height + 1) & ~1;
                 visiong::bufstate::mark_device_write(frame_out, visiong::bufstate::BufferOwner::Camera);
@@ -865,21 +1121,15 @@ int CaptureV4L2Impl::read_frame_to_yuv_buffer(ImageBuffer& frame_out) {
 }
 
 int CaptureV4L2Impl::stop_streaming() {
-    if (fd >= 0) {
+    if (fd >= 0 && streaming) {
         ioctl(fd, VIDIOC_STREAMOFF, &buf_type);
-    }
-    if (aiq_ctx) {
-        rk_aiq_uapi2_sysctl_stop(aiq_ctx, false);
+        streaming = false;
     }
     return 0;
 }
 
 int CaptureV4L2Impl::close() {
     stop_streaming();
-    if (aiq_ctx) {
-        rk_aiq_uapi2_sysctl_deinit(aiq_ctx);
-        aiq_ctx = nullptr;
-    }
     for (auto& buf : buffers) {
         if (buf.start && buf.start != MAP_FAILED) {
             munmap(buf.start, buf.length);
@@ -892,12 +1142,15 @@ int CaptureV4L2Impl::close() {
         ::close(fd);
         fd = -1;
     }
+    aiq_ctx = nullptr;
+    aiq_lease.reset();
     return 0;
 }
 
 
 struct CameraImpl {
     std::unique_ptr<CaptureV4L2> v4l2_capture;
+    std::unique_ptr<Camera> sub_camera;
     int target_width = 0;
     int target_height = 0;
     int actual_capture_width = 0;
@@ -905,8 +1158,11 @@ struct CameraImpl {
     int sensor_max_width = 0;
     int sensor_max_height = 0;
     PIXEL_FORMAT_E output_format = RK_FMT_YUV420SP;
+    std::string format_label = "yuv";
     CameraCropMode crop_mode;
     std::string requested_crop_mode = "auto";
+    std::string isp_path_label = "main";
+    std::string device_path = "/dev/video11";
     bool hdr_enabled = false;
     std::atomic<bool> initialized{false};
     const char* iq_files_dir = "/etc/iqfiles/";
@@ -921,12 +1177,13 @@ Camera::Camera(int target_width,
                int target_height,
                const std::string& format,
                bool hdr_enabled,
-               const std::string& crop_mode)
+               const std::string& crop_mode,
+               const std::string& isp_path)
     : m_impl(std::make_unique<CameraImpl>()) {
     visiong::initialize_camera_log_filter();
     std::lock_guard<std::recursive_mutex> lock(g_sys_init_mutex);
     g_camera_instance_count++;
-    if (!init(target_width, target_height, format, hdr_enabled, crop_mode)) {
+    if (!init(target_width, target_height, format, hdr_enabled, crop_mode, isp_path)) {
         VISIONG_LOG_ERROR("Camera", "Initialization failed in constructor.");
     }
 }
@@ -953,7 +1210,8 @@ bool Camera::init(int user_width,
                   int user_height,
                   const std::string& format,
                   bool hdr_enabled,
-                  const std::string& crop_mode) {
+                  const std::string& crop_mode,
+                  const std::string& isp_path) {
     if (m_impl->initialized)
         return true;
     if (user_width <= 0 || user_height <= 0) {
@@ -965,10 +1223,22 @@ bool Camera::init(int user_width,
     m_impl->requested_crop_mode = trim_copy(crop_mode.empty() ? std::string("auto") : crop_mode);
     const CameraCropMode requested_crop_mode = parse_camera_crop_mode(m_impl->requested_crop_mode);
 
-    const CameraResolutionCaps sensor_caps = probe_camera_resolution_caps("/dev/video11");
+    const std::string selected_isp_path = choose_camera_isp_path(user_width,
+                                                                 user_height,
+                                                                 m_impl->requested_crop_mode,
+                                                                 isp_path);
+    const CameraIspPath resolved_isp_path = resolve_camera_isp_path(selected_isp_path);
+    m_impl->isp_path_label = resolved_isp_path.label;
+    m_impl->device_path = resolved_isp_path.device_path;
+
+    const CameraResolutionCaps sensor_caps = probe_camera_resolution_caps(m_impl->device_path.c_str());
     m_impl->sensor_max_width = sensor_caps.max_width;
     m_impl->sensor_max_height = sensor_caps.max_height;
     m_impl->crop_mode = resolve_camera_crop_mode(requested_crop_mode, sensor_caps);
+    CameraResolutionCaps aiq_caps = probe_camera_system_resolution_caps();
+    if (!aiq_caps.is_valid()) {
+        aiq_caps = sensor_caps;
+    }
 
     const std::string effective_format = normalize_camera_format_token(format);
     if (effective_format != format) {
@@ -977,6 +1247,7 @@ bool Camera::init(int user_width,
 
     try {
         m_impl->output_format = visiong::parse_camera_pixel_format(effective_format);
+        m_impl->format_label = effective_format;
     } catch (const std::exception& e) {
         VISIONG_LOG_ERROR("Camera", "Invalid format: " << e.what());
         throw;
@@ -1005,7 +1276,8 @@ bool Camera::init(int user_width,
                      "User request " << user_width << "x" << user_height << ", format " << format
                                      << " (effective " << effective_format << "), requested crop_mode "
                                      << m_impl->requested_crop_mode << ", effective crop_mode "
-                                     << m_impl->crop_mode.label);
+                                     << m_impl->crop_mode.label << ", isp_path "
+                                     << m_impl->isp_path_label << " (" << m_impl->device_path << ")");
     VISIONG_LOG_INFO("Camera",
                      "Final target (aligned): " << m_impl->target_width << "x" << m_impl->target_height);
 
@@ -1030,8 +1302,11 @@ bool Camera::init(int user_width,
             m_impl->hdr_enabled ? RK_AIQ_WORKING_MODE_ISP_HDR2 : RK_AIQ_WORKING_MODE_NORMAL;
         VISIONG_LOG_INFO("Camera", "Initializing V4L2 with WDR mode: " << (m_impl->hdr_enabled ? "HDR2" : "NORMAL"));
 
-        if (m_impl->v4l2_capture->open_and_prepare(m_impl->actual_capture_width,
+        if (m_impl->v4l2_capture->open_and_prepare(m_impl->device_path,
+                                                   m_impl->actual_capture_width,
                                                    m_impl->actual_capture_height,
+                                                   aiq_caps.max_width,
+                                                   aiq_caps.max_height,
                                                    30.0f,
                                                    m_impl->iq_files_dir,
                                                    wdr_mode) != 0) {
@@ -1043,7 +1318,11 @@ bool Camera::init(int user_width,
         }
     } catch (const std::exception& e) {
         VISIONG_LOG_ERROR("Camera", "Error during V4L2 initialization: " << e.what());
-        release();
+        if (m_impl->v4l2_capture) {
+            m_impl->v4l2_capture->close();
+            m_impl->v4l2_capture.reset();
+        }
+        m_impl->isp_controller.reset();
         return false;
     }
     m_impl->initialized = true;
@@ -1260,6 +1539,81 @@ ImageBuffer Camera::snapshot() {
         return processing_buf->copy();
     }
 }
+
+std::unique_ptr<Camera> Camera::open_stream(int target_width,
+                                            int target_height,
+                                            const std::string& format,
+                                            const std::string& crop_mode,
+                                            const std::string& isp_path) {
+    if (!m_impl->initialized.load()) {
+        throw std::runtime_error("open_stream: Camera is not initialized. Please call init() first.");
+    }
+    if (target_width <= 0 || target_height <= 0) {
+        throw std::invalid_argument("open_stream: target_width and target_height must be positive.");
+    }
+
+    const std::string requested_format = visiong::to_lower_copy(trim_copy(format));
+    const std::string stream_format =
+        requested_format.empty() || requested_format == "auto" ? m_impl->format_label : requested_format;
+    const std::string stream_crop_mode = trim_copy(crop_mode.empty() ? std::string("auto") : crop_mode);
+    const std::string requested_isp_path = trim_copy(isp_path);
+    const std::string requested_isp_key = visiong::to_lower_copy(requested_isp_path);
+    const std::string stream_isp_path =
+        requested_isp_key.empty() || requested_isp_key == "auto"
+            ? choose_camera_isp_path(target_width,
+                                     target_height,
+                                     stream_crop_mode,
+                                     requested_isp_path,
+                                     m_impl->device_path)
+            : requested_isp_path;
+    const CameraIspPath resolved_stream_path = resolve_camera_isp_path(stream_isp_path);
+    if (resolved_stream_path.device_path == m_impl->device_path) {
+        throw std::invalid_argument("open_stream: stream ISP path resolves to the same device as the parent camera.");
+    }
+
+    auto stream = std::make_unique<Camera>();
+    if (!stream->init(target_width,
+                      target_height,
+                      stream_format,
+                      m_impl->hdr_enabled,
+                      stream_crop_mode,
+                      stream_isp_path)) {
+        throw std::runtime_error(
+            "open_stream: failed to initialize the requested camera stream. "
+            "Open the highest-resolution/main Camera first, then derive smaller streams from it.");
+    }
+    return stream;
+}
+
+Camera& Camera::sub(int target_width,
+                    int target_height,
+                    const std::string& format,
+                    const std::string& crop_mode,
+                    const std::string& isp_path) {
+    close_sub();
+    auto stream = open_stream(target_width, target_height, format, crop_mode, isp_path);
+    m_impl->sub_camera = std::move(stream);
+    return *this;
+}
+
+std::pair<ImageBuffer, ImageBuffer> Camera::snapshots() {
+    if (!m_impl->sub_camera || !m_impl->sub_camera->is_initialized()) {
+        throw std::runtime_error("snapshots: sub stream is not configured. Call sub() first.");
+    }
+    return {snapshot(), m_impl->sub_camera->snapshot()};
+}
+
+bool Camera::has_sub() const {
+    return m_impl->sub_camera && m_impl->sub_camera->is_initialized();
+}
+
+void Camera::close_sub() {
+    if (m_impl->sub_camera) {
+        m_impl->sub_camera->release();
+        m_impl->sub_camera.reset();
+    }
+}
+
 void Camera::skip_frames(int num_frames) {
     if (!m_impl->initialized.load()) {
         throw std::runtime_error("skip_frames: Camera is not initialized. Please call init() first.");
@@ -1270,7 +1624,12 @@ void Camera::skip_frames(int num_frames) {
 
     for (int i = 0; i < num_frames; ++i) {
         ImageBuffer discarded_frame = this->snapshot();
-        if (!discarded_frame.is_valid()) {
+        ImageBuffer discarded_sub_frame;
+        if (m_impl->sub_camera && m_impl->sub_camera->is_initialized()) {
+            discarded_sub_frame = m_impl->sub_camera->snapshot();
+        }
+        if (!discarded_frame.is_valid() ||
+            (m_impl->sub_camera && m_impl->sub_camera->is_initialized() && !discarded_sub_frame.is_valid())) {
             VISIONG_LOG_WARN("Camera", "Failed to capture a valid frame while skipping (at frame "
                                            << i + 1 << "/" << num_frames
                                            << "). Stopping the skip process.");
@@ -1280,6 +1639,7 @@ void Camera::skip_frames(int num_frames) {
     VISIONG_LOG_INFO("Camera", "Frame skipping complete.");
 }
 void Camera::release() {
+    close_sub();
     if (!m_impl->initialized.load())
         return;
     m_impl->isp_controller.reset();
@@ -1320,6 +1680,18 @@ int Camera::get_actual_capture_height() const {
 }
 std::string Camera::get_crop_mode() const {
     return m_impl->crop_mode.label;
+}
+std::string Camera::get_format() const {
+    return m_impl->format_label;
+}
+bool Camera::is_hdr_enabled() const {
+    return m_impl->hdr_enabled;
+}
+std::string Camera::get_isp_path() const {
+    return m_impl->isp_path_label;
+}
+std::string Camera::get_device_path() const {
+    return m_impl->device_path;
 }
 
 // ISP Control Methods / ISP 控制方法。

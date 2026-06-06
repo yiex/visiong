@@ -259,6 +259,7 @@ public:
 
     ImageBuffer rotate(int angle_degrees) const;
     ImageBuffer flip(bool horizontal, bool vertical) const;
+    ImageBuffer alpha_composite(const ImageBuffer& overlay, int x = 0, int y = 0) const;
 };
 
 #endif  // VISIONG_CORE_IMAGEBUFFER_H

@@ -254,6 +254,25 @@ void bind_image_buffer(py::module_& m) {
             return image_buffer_from_numpy_impl(arr, fmt, false, true);
         }, "array"_a, "format"_a = "auto", py::return_value_policy::move,
         "Strict zero-copy import from a NumPy array. Requires dtype=uint8, C-contiguous layout, and even width/height; otherwise raises instead of silently copying.")
+        .def_static("from_bytes", [](py::buffer data, int width, int height, const std::string& fmt) {
+            py::buffer_info info = data.request();
+            if (info.itemsize != static_cast<ssize_t>(sizeof(unsigned char))) {
+                throw std::runtime_error("from_bytes: expected a byte-oriented buffer.");
+            }
+            PIXEL_FORMAT_E pixel_format = visiong::parse_pixel_format(fmt);
+            const int bpp = get_bpp_for_format(pixel_format);
+            if (bpp == 0 || bpp % 8 != 0) {
+                throw std::runtime_error("from_bytes: unsupported pixel format.");
+            }
+            const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(bpp / 8);
+            const size_t available = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+            if (width <= 0 || height <= 0 || available != expected) {
+                throw std::runtime_error("from_bytes: buffer size must exactly match width * height * bytes_per_pixel.");
+            }
+            const unsigned char* src = static_cast<const unsigned char*>(info.ptr);
+            return ImageBuffer(width, height, pixel_format, std::vector<unsigned char>(src, src + expected));
+        }, "data"_a, "width"_a, "height"_a, "format"_a, py::return_value_policy::move,
+        "Creates a compact CPU-backed ImageBuffer from bytes-like data.")
         .def_property_readonly("data", [](const ImageBuffer& img) {
              std::string raw;
              {
@@ -342,6 +361,11 @@ void bind_image_buffer(py::module_& m) {
 	            return self.crop(std::make_tuple(x, y, w, h));
 	        }, "x"_a, "y"_a, "w"_a, "h"_a, py::call_guard<py::gil_scoped_release>(), py::return_value_policy::move,
 	        "Crops to the region (x, y, w, h). Uses RGA.")
+
+	        .def("alpha_composite", &ImageBuffer::alpha_composite,
+                 "overlay"_a, "x"_a = 0, "y"_a = 0,
+                 py::call_guard<py::gil_scoped_release>(), py::return_value_policy::move,
+                 "Alpha-composites an RGBA8888 overlay onto this image using the RGA DMA path. Currently supports RGB565/BGR565 destination images.")
 
 	        .def("rotate", &ImageBuffer::rotate, "angle_degrees"_a, py::call_guard<py::gil_scoped_release>(), py::return_value_policy::move, "Rotates the image by 90, 180, or 270 degrees using hardware acceleration.")
 	        .def("flip", &ImageBuffer::flip, "horizontal"_a, "vertical"_a, py::call_guard<py::gil_scoped_release>(), py::return_value_policy::move, "Flips the image horizontally and/or vertically using hardware acceleration.")

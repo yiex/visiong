@@ -10,7 +10,10 @@
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <unistd.h>
 
 #if defined(__ARM_NEON)
@@ -163,6 +166,35 @@ void copy_data_from_stride(void* dst,
         dst_row += dst_width_bytes;
         src_row += src_stride_bytes;
     }
+}
+
+void copy_premultiplied_rgba_to_stride(void* dst,
+                                       int dst_stride_pixels,
+                                       const void* src,
+                                       int src_stride_pixels,
+                                       int width,
+                                       int height) {
+    uint8_t* dst_base = static_cast<uint8_t*>(dst);
+    const uint8_t* src_base = static_cast<const uint8_t*>(src);
+    for (int y = 0; y < height; ++y) {
+        uint8_t* dst_row = dst_base + static_cast<size_t>(y) * dst_stride_pixels * 4;
+        const uint8_t* src_row = src_base + static_cast<size_t>(y) * src_stride_pixels * 4;
+        for (int x = 0; x < width; ++x) {
+            const uint8_t* s = src_row + x * 4;
+            uint8_t* d = dst_row + x * 4;
+            const int alpha = s[3];
+            d[0] = static_cast<uint8_t>((static_cast<int>(s[0]) * alpha + 127) / 255);
+            d[1] = static_cast<uint8_t>((static_cast<int>(s[1]) * alpha + 127) / 255);
+            d[2] = static_cast<uint8_t>((static_cast<int>(s[2]) * alpha + 127) / 255);
+            d[3] = static_cast<uint8_t>(alpha);
+        }
+    }
+}
+
+std::string rga_error(const char* op, IM_STATUS status) {
+    const char* detail = imStrError_t(status);
+    return std::string(op) + " failed: " + std::to_string(static_cast<int>(status)) +
+           (detail ? (std::string(" ") + detail) : std::string());
 }
 
 RgaDmaBuffer::RgaDmaBuffer(int width, int height, int format, int wstride, int hstride, size_t size)
@@ -845,6 +877,130 @@ ImageBuffer ImageBuffer::crop(const std::tuple<int, int, int, int>& rect_tuple) 
     ImageBuffer dst_img;
     dst_img.copy_from_dma(dst_dma);
     return dst_img;
+}
+
+ImageBuffer ImageBuffer::alpha_composite(const ImageBuffer& overlay, int x, int y) const {
+    if (!is_valid()) {
+        throw std::runtime_error("alpha_composite: invalid destination image");
+    }
+    if (!overlay.is_valid()) {
+        throw std::runtime_error("alpha_composite: invalid overlay image");
+    }
+    if (this->format != RK_FMT_RGB565 && this->format != RK_FMT_BGR565) {
+        throw std::runtime_error("alpha_composite: RGA path currently supports RGB565/BGR565 destination images only");
+    }
+    if (overlay.format != RK_FMT_RGBA8888) {
+        throw std::runtime_error("alpha_composite: RGA path currently supports RGBA8888 overlays only");
+    }
+    if (overlay.width <= 0 || overlay.height <= 0) {
+        throw std::runtime_error("alpha_composite: overlay dimensions must be positive");
+    }
+    if (x < 0 || y < 0 || x + overlay.width > this->width || y + overlay.height > this->height) {
+        throw std::runtime_error("alpha_composite: overlay must be fully inside the destination image");
+    }
+    const int w = overlay.width;
+    const int h = overlay.height;
+
+    std::unique_ptr<RgaDmaBuffer> src_holder;
+    if (this->is_zero_copy() && this->get_dma_fd() >= 0) {
+        src_holder.reset(new RgaDmaBuffer(this->get_dma_fd(),
+                                          const_cast<void*>(this->get_data()),
+                                          this->get_size(),
+                                          this->width,
+                                          this->height,
+                                          static_cast<int>(this->format),
+                                          this->w_stride,
+                                          this->h_stride));
+    } else {
+        src_holder.reset(new RgaDmaBuffer(this->width, this->height, static_cast<int>(this->format)));
+        const int bpp = get_bpp_for_format(this->format);
+        visiong::bufstate::prepare_cpu_read(*this);
+        copy_data_with_stride(src_holder->get_vir_addr(),
+                              src_holder->get_wstride() * bpp / 8,
+                              this->get_data(),
+                              this->w_stride * bpp / 8,
+                              this->height,
+                              this->width * bpp / 8);
+        visiong::bufstate::mark_cpu_write(*src_holder);
+    }
+    visiong::bufstate::prepare_device_read(*src_holder, visiong::bufstate::BufferOwner::RGA);
+
+    auto overlay_holder = std::make_unique<RgaDmaBuffer>(overlay.width, overlay.height, static_cast<int>(overlay.format));
+    visiong::bufstate::prepare_cpu_read(overlay);
+    visiong::bufstate::prepare_cpu_write(*overlay_holder, visiong::bufstate::AccessIntent::Overwrite);
+    copy_premultiplied_rgba_to_stride(overlay_holder->get_vir_addr(),
+                                      overlay_holder->get_wstride(),
+                                      overlay.get_data(),
+                                      overlay.w_stride,
+                                      overlay.width,
+                                      overlay.height);
+    visiong::bufstate::mark_cpu_write(*overlay_holder);
+    visiong::bufstate::prepare_device_read(*overlay_holder, visiong::bufstate::BufferOwner::RGA);
+
+    auto dst_sptr = std::make_shared<RgaDmaBuffer>(this->width, this->height, static_cast<int>(this->format));
+    visiong::bufstate::prepare_device_write(*dst_sptr,
+                                             visiong::bufstate::BufferOwner::RGA,
+                                             visiong::bufstate::AccessIntent::Overwrite);
+    IM_STATUS status = imcopy(src_holder->get_buffer(), dst_sptr->get_buffer());
+    if (status != IM_STATUS_SUCCESS) {
+        throw std::runtime_error(rga_error("alpha_composite imcopy", status));
+    }
+    visiong::bufstate::mark_device_write(*dst_sptr, visiong::bufstate::BufferOwner::RGA);
+
+    RgaDmaBuffer base_dma(w, h, static_cast<int>(this->format));
+    RgaDmaBuffer blended_dma(w, h, static_cast<int>(this->format));
+    const im_rect src_rect = {x, y, w, h};
+    const im_rect local_rect = {0, 0, w, h};
+
+    visiong::bufstate::prepare_device_write(base_dma,
+                                            visiong::bufstate::BufferOwner::RGA,
+                                            visiong::bufstate::AccessIntent::Overwrite);
+    status = imcrop(src_holder->get_buffer(), base_dma.get_buffer(), src_rect);
+    if (status != IM_STATUS_SUCCESS) {
+        throw std::runtime_error(rga_error("alpha_composite imcrop", status));
+    }
+    visiong::bufstate::mark_device_write(base_dma, visiong::bufstate::BufferOwner::RGA);
+
+    visiong::bufstate::prepare_device_read(base_dma, visiong::bufstate::BufferOwner::RGA);
+    visiong::bufstate::prepare_device_write(blended_dma,
+                                            visiong::bufstate::BufferOwner::RGA,
+                                            visiong::bufstate::AccessIntent::Overwrite);
+    rga_buffer_t overlay_buf = overlay_holder->get_buffer();
+    rga_buffer_t base_buf = base_dma.get_buffer();
+    rga_buffer_t blended_buf = blended_dma.get_buffer();
+    overlay_buf.global_alpha = 255;
+    base_buf.global_alpha = 255;
+    blended_buf.global_alpha = 255;
+
+    IM_STATUS check = imcheck_composite(overlay_buf,
+                                        base_buf,
+                                        blended_buf,
+                                        local_rect,
+                                        local_rect,
+                                        local_rect,
+                                        IM_ALPHA_BLEND_SRC_OVER);
+    if (check < 0) {
+        throw std::runtime_error(rga_error("alpha_composite imcheck_composite", check));
+    }
+    status = imblend_t(overlay_buf, base_buf, blended_buf, IM_ALPHA_BLEND_SRC_OVER, 1);
+    if (status != IM_STATUS_SUCCESS) {
+        throw std::runtime_error(rga_error("alpha_composite imblend_t", status));
+    }
+    visiong::bufstate::mark_device_write(blended_dma, visiong::bufstate::BufferOwner::RGA);
+
+    visiong::bufstate::prepare_device_read(blended_dma, visiong::bufstate::BufferOwner::RGA);
+    visiong::bufstate::prepare_device_write(*dst_sptr,
+                                            visiong::bufstate::BufferOwner::RGA,
+                                            visiong::bufstate::AccessIntent::ReadModifyWrite);
+    status = improcess(blended_dma.get_buffer(), dst_sptr->get_buffer(), {}, local_rect, src_rect, {}, IM_SYNC);
+    if (status != IM_STATUS_SUCCESS) {
+        throw std::runtime_error(rga_error("alpha_composite improcess", status));
+    }
+    visiong::bufstate::mark_device_write(*dst_sptr, visiong::bufstate::BufferOwner::RGA);
+
+    ImageBuffer out(this->width, this->height, this->format, std::move(dst_sptr));
+    visiong::bufstate::mark_device_write(out, visiong::bufstate::BufferOwner::RGA);
+    return out;
 }
 
 ImageBuffer ImageBuffer::letterbox(int target_width, int target_height, std::tuple<unsigned char, unsigned char, unsigned char> color) const {

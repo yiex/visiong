@@ -161,8 +161,8 @@ void bind_io_devices(py::module_& m) {
         "width"_a = 240,
         "height"_a = 320,
         "rotation_degrees"_a = 90,
-        "dc_pin"_a = "GPIO1_C5",
-        "reset_pin"_a = "GPIO1_C4",
+        "dc_pin"_a = "GPIO1_C3",
+        "reset_pin"_a = "GPIO1_C2",
         "backlight_pin"_a = "",
         "speed_hz"_a = 50000000,
         "x_offset"_a = 0,
@@ -182,6 +182,54 @@ void bind_io_devices(py::module_& m) {
         .def("display", static_cast<bool (DisplaySPI::*)(const ImageBuffer&, const std::tuple<int, int, int, int>&)>(&DisplaySPI::display),
              "img_buf"_a, "roi"_a, py::call_guard<py::gil_scoped_release>(),
              "Displays a source ROI over SPI.")
+        .def("display_area", static_cast<bool (DisplaySPI::*)(const ImageBuffer&, int, int)>(&DisplaySPI::display_area),
+             "img_buf"_a, "x"_a = 0, "y"_a = 0, py::call_guard<py::gil_scoped_release>(),
+             "Displays an image at screen coordinates without scaling the whole panel.")
+        .def("display_area", static_cast<bool (DisplaySPI::*)(const ImageBuffer&, int, int, const std::tuple<int, int, int, int>&)>(&DisplaySPI::display_area),
+             "img_buf"_a, "x"_a, "y"_a, "roi"_a, py::call_guard<py::gil_scoped_release>(),
+             "Displays a source ROI at screen coordinates without scaling the whole panel.")
+        .def("draw_rgb565",
+             [](DisplaySPI& self,
+                int x,
+                int y,
+                int w,
+                int h,
+                py::buffer data,
+                size_t stride_bytes,
+                bool source_is_native_endian) {
+                 py::buffer_info info = data.request();
+                 if (info.ndim < 1 || info.itemsize <= 0) {
+                     throw py::value_error("draw_rgb565 expects a contiguous bytes-like or uint16 buffer.");
+                 }
+                 if (info.strides.empty() || info.strides.back() != info.itemsize) {
+                     throw py::value_error("draw_rgb565 expects a contiguous buffer.");
+                 }
+                 const size_t size_bytes = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+                 py::gil_scoped_release release;
+                 return self.draw_rgb565(x, y, w, h, info.ptr, size_bytes, stride_bytes, source_is_native_endian);
+             },
+             "x"_a, "y"_a, "w"_a, "h"_a, "data"_a, "stride_bytes"_a = 0,
+             "source_is_native_endian"_a = true,
+             "Writes a raw RGB565 rectangle directly to the panel and shadow buffer. Native-endian data is converted to panel byte order.")
+        .def("draw_pixel", &DisplaySPI::draw_pixel,
+             "x"_a, "y"_a, "color_rgb565"_a, py::call_guard<py::gil_scoped_release>(),
+             "Draws one RGB565 pixel directly on the panel.")
+        .def("draw_line", &DisplaySPI::draw_line,
+             "x0"_a, "y0"_a, "x1"_a, "y1"_a, "color_rgb565"_a, "thickness"_a = 1,
+             py::call_guard<py::gil_scoped_release>(),
+             "Draws a line directly on the panel.")
+        .def("draw_rectangle", &DisplaySPI::draw_rectangle,
+             "x"_a, "y"_a, "w"_a, "h"_a, "color_rgb565"_a, "thickness"_a = 1, "fill"_a = false,
+             py::call_guard<py::gil_scoped_release>(),
+             "Draws a rectangle directly on the panel.")
+        .def("draw_circle", &DisplaySPI::draw_circle,
+             "cx"_a, "cy"_a, "radius"_a, "color_rgb565"_a, "thickness"_a = 1, "fill"_a = false,
+             py::call_guard<py::gil_scoped_release>(),
+             "Draws a circle directly on the panel.")
+        .def("draw_cross", &DisplaySPI::draw_cross,
+             "cx"_a, "cy"_a, "color_rgb565"_a, "size"_a = 5, "thickness"_a = 1,
+             py::call_guard<py::gil_scoped_release>(),
+             "Draws a cross directly on the panel.")
         .def("clear", &DisplaySPI::clear, "color_rgb565"_a = 0, py::call_guard<py::gil_scoped_release>(),
              "Fills the panel with one RGB565 color.")
         .def("configure_geometry", &DisplaySPI::configure_geometry,
@@ -219,6 +267,7 @@ void bind_io_devices(py::module_& m) {
             "Displays the image region (x, y, w, h) on the framebuffer. Returns True on success.")
         .def("release", &DisplayFB::release, py::call_guard<py::gil_scoped_release>(), "Releases framebuffer resources.")
         .def("is_initialized", &DisplayFB::is_initialized, "Returns True if the framebuffer is initialized.")
+        .def_static("is_any_active", &DisplayFB::is_any_active, "Returns True when any DisplayFB instance is active.")
         .def_property_readonly("screen_width", &DisplayFB::screen_width, "Framebuffer width in pixels.")
         .def_property_readonly("screen_height", &DisplayFB::screen_height, "Framebuffer height in pixels.")
         .def("__repr__", [](const DisplayFB& self) {

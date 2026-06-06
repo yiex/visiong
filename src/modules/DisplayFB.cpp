@@ -41,6 +41,7 @@ struct DisplayTask {
 };
 
 constexpr char kFbDevice[] = "/dev/fb0";
+std::atomic<int> g_displayfb_instance_count{0};
 
 struct DisplayFB::Impl {
     explicit Impl(Mode display_mode) : mode(display_mode) {}
@@ -364,7 +365,9 @@ static void bgr888_to_rgb666_packed24_c(const uint8_t* src, void* dst, int width
 DisplayFB::DisplayFB(Mode mode)
     : m_impl(std::make_unique<Impl>(mode)) {
     m_impl->fb_fd = open(kFbDevice, O_RDWR);
-    if (m_impl->fb_fd < 0) throw std::runtime_error("DisplayFB Error: Cannot open framebuffer device.");
+    if (m_impl->fb_fd < 0) {
+        throw std::runtime_error("DisplayFB Error: Cannot open framebuffer device.");
+    }
     
     fb_var_screeninfo vinfo;
     if (ioctl(m_impl->fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) { 
@@ -459,6 +462,7 @@ DisplayFB::DisplayFB(Mode mode)
         throw;
     }
     m_impl->initialized = true;
+    g_displayfb_instance_count.fetch_add(1, std::memory_order_acq_rel);
     
     VISIONG_LOG_INFO("DisplayFB",
                      "Initialized successfully. Mode: "
@@ -484,7 +488,9 @@ void DisplayFB::release() {
     }
     if (m_impl->fb_mem && m_impl->fb_mem != MAP_FAILED) { munmap(m_impl->fb_mem, m_impl->screen_size); m_impl->fb_mem = nullptr; }
     if (m_impl->fb_fd >= 0) { close(m_impl->fb_fd); m_impl->fb_fd = -1; }
-    m_impl->initialized = false;
+    if (m_impl->initialized.exchange(false)) {
+        g_displayfb_instance_count.fetch_sub(1, std::memory_order_acq_rel);
+    }
     VISIONG_LOG_INFO("DisplayFB", "Released.");
 }
 
@@ -718,3 +724,6 @@ int DisplayFB::get_screen_width() const { return m_impl->screen_width; }
 
 int DisplayFB::get_screen_height() const { return m_impl->screen_height; }
 
+bool DisplayFB::is_any_active() {
+    return g_displayfb_instance_count.load(std::memory_order_acquire) > 0;
+}
