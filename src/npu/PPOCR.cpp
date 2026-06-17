@@ -618,6 +618,81 @@ inline float fast_sigmoid(float x) {
     return 1.0f / (1.0f + std::exp(-clamped));
 }
 
+inline float prob_like_confidence(float best_val, float row_sum) {
+    if (!std::isfinite(best_val)) {
+        return 0.0f;
+    }
+    if (std::isfinite(row_sum) && row_sum > 1e-8f) {
+        return clamp_float(best_val / row_sum, 0.0f, 1.0f);
+    }
+    return clamp_float(best_val, 0.0f, 1.0f);
+}
+
+inline float logit_margin_confidence(float best_val, float second_best_val) {
+    if (!std::isfinite(best_val)) {
+        return 0.0f;
+    }
+    if (!std::isfinite(second_best_val)) {
+        second_best_val = 0.0f;
+    }
+    constexpr float kLogitMarginScale = 0.07f;
+    return fast_sigmoid((best_val - second_best_val) * kLogitMarginScale);
+}
+
+bool tensor_name_looks_prob(const rknn_tensor_attr& attr) {
+    if (attr.name == nullptr) {
+        return false;
+    }
+
+    std::string lower(attr.name);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower.find("softmax") != std::string::npos || lower.find("sigmoid") != std::string::npos ||
+           lower.find("prob") != std::string::npos;
+}
+
+bool tensor_layout_looks_prob(const rknn_tensor_attr& attr,
+                              const void* raw,
+                              int seq_len,
+                              int vocab,
+                              bool vocab_major) {
+    if (raw == nullptr || seq_len <= 0 || vocab <= 1) {
+        return false;
+    }
+    if (attr.type != RKNN_TENSOR_FLOAT16 && attr.type != RKNN_TENSOR_FLOAT32) {
+        return false;
+    }
+
+    const int sample_steps = std::min(seq_len, 3);
+    int prob_like_steps = 0;
+    for (int t = 0; t < sample_steps; ++t) {
+        float row_sum = 0.0f;
+        float row_min = std::numeric_limits<float>::max();
+        float row_max = std::numeric_limits<float>::lowest();
+        for (int j = 0; j < vocab; ++j) {
+            const float v = tensor_value_as_f32(attr, raw, ctc_linear_index(t, j, seq_len, vocab, vocab_major));
+            row_sum += v;
+            row_min = std::min(row_min, v);
+            row_max = std::max(row_max, v);
+        }
+
+        if (row_min >= -1e-4f && row_max <= 1.0005f) {
+            if (std::fabs(row_sum - 1.0f) <= 0.1f) {
+                ++prob_like_steps;
+            } else if (row_sum > row_max + 1e-4f && row_sum >= 0.05f && row_sum <= 1.2f) {
+                ++prob_like_steps;
+            }
+        }
+    }
+    return prob_like_steps >= std::max(1, sample_steps / 2);
+}
+
+bool ppocr_score_debug_enabled() {
+    static const bool enabled = (std::getenv("VISIONG_PPOCR_SCORE_DEBUG") != nullptr);
+    return enabled;
+}
+
 DecodeCandidate decode_ctc_layout_fp16(const uint16_t* values,
                                        int seq_len,
                                        int vocab,
@@ -637,30 +712,44 @@ DecodeCandidate decode_ctc_layout_fp16(const uint16_t* values,
     for (int t = 0; t < seq_len; ++t) {
         int best_idx = 0;
         uint16_t best_raw = values[ctc_linear_index(t, 0, seq_len, vocab, vocab_major)];
+        uint16_t second_best_raw = best_raw;
         float best_val = 0.0f;
+        float second_best_val = 0.0f;
+        float row_sum = 0.0f;
         if (values_are_prob) {
+            row_sum = fp16_to_fp32(best_raw);
             for (int j = 1; j < vocab; ++j) {
                 const uint16_t raw = values[ctc_linear_index(t, j, seq_len, vocab, vocab_major)];
+                row_sum += fp16_to_fp32(raw);
                 if (raw > best_raw) {
+                    second_best_raw = best_raw;
                     best_raw = raw;
                     best_idx = j;
+                } else if (raw > second_best_raw) {
+                    second_best_raw = raw;
                 }
             }
             best_val = fp16_to_fp32(best_raw);
+            second_best_val = fp16_to_fp32(second_best_raw);
         } else {
             best_val = fp16_to_fp32(best_raw);
+            second_best_val = best_val;
             for (int j = 1; j < vocab; ++j) {
                 const uint16_t raw = values[ctc_linear_index(t, j, seq_len, vocab, vocab_major)];
                 const float v = fp16_to_fp32(raw);
                 if (v > best_val) {
+                    second_best_val = best_val;
                     best_raw = raw;
                     best_val = v;
                     best_idx = j;
+                } else if (v > second_best_val) {
+                    second_best_val = v;
                 }
             }
         }
 
-        const float best_prob = values_are_prob ? std::max(best_val, 0.0f) : fast_sigmoid(best_val);
+        const float best_prob = values_are_prob ? prob_like_confidence(best_val, row_sum)
+                                                : logit_margin_confidence(best_val, second_best_val);
         timestep_max_sum += best_prob;
 
         if (best_idx > 0 && best_idx != prev_idx) {
@@ -703,22 +792,64 @@ DecodeCandidate decode_ctc_layout_quantized(const T* values,
     for (int t = 0; t < seq_len; ++t) {
         int best_idx = 0;
         T best_raw = 0;
+        T second_best_raw = 0;
+        float row_sum = 0.0f;
         if (!vocab_major) {
             const T* row = values + t * vocab;
-            best_idx = argmax_row<T>(row, vocab, &best_raw);
+            if (values_are_prob) {
+                best_raw = row[0];
+                second_best_raw = best_raw;
+                row_sum = (static_cast<float>(best_raw) - static_cast<float>(zp)) * safe_scale;
+                for (int j = 1; j < vocab; ++j) {
+                    const T raw = row[j];
+                    row_sum += (static_cast<float>(raw) - static_cast<float>(zp)) * safe_scale;
+                    if (raw > best_raw) {
+                        second_best_raw = best_raw;
+                        best_raw = raw;
+                        best_idx = j;
+                    } else if (raw > second_best_raw) {
+                        second_best_raw = raw;
+                    }
+                }
+            } else {
+                best_raw = row[0];
+                second_best_raw = best_raw;
+                for (int j = 1; j < vocab; ++j) {
+                    const T raw = row[j];
+                    if (raw > best_raw) {
+                        second_best_raw = best_raw;
+                        best_raw = raw;
+                        best_idx = j;
+                    } else if (raw > second_best_raw) {
+                        second_best_raw = raw;
+                    }
+                }
+            }
         } else {
             best_raw = values[ctc_linear_index(t, 0, seq_len, vocab, vocab_major)];
+            second_best_raw = best_raw;
+            if (values_are_prob) {
+                row_sum = (static_cast<float>(best_raw) - static_cast<float>(zp)) * safe_scale;
+            }
             for (int j = 1; j < vocab; ++j) {
                 const T raw = values[ctc_linear_index(t, j, seq_len, vocab, vocab_major)];
+                if (values_are_prob) {
+                    row_sum += (static_cast<float>(raw) - static_cast<float>(zp)) * safe_scale;
+                }
                 if (raw > best_raw) {
+                    second_best_raw = best_raw;
                     best_raw = raw;
                     best_idx = j;
+                } else if (raw > second_best_raw) {
+                    second_best_raw = raw;
                 }
             }
         }
 
         const float best_val = (static_cast<float>(best_raw) - static_cast<float>(zp)) * safe_scale;
-        const float best_prob = values_are_prob ? clamp_float(best_val, 0.0f, 1.0f) : fast_sigmoid(best_val);
+        const float second_best_val = (static_cast<float>(second_best_raw) - static_cast<float>(zp)) * safe_scale;
+        const float best_prob = values_are_prob ? prob_like_confidence(best_val, row_sum)
+                                                : logit_margin_confidence(best_val, second_best_val);
         timestep_max_sum += best_prob;
 
         if (best_idx > 0 && best_idx != prev_idx) {
@@ -756,15 +887,24 @@ DecodeCandidate decode_ctc_layout_fp32(const float* values,
     for (int t = 0; t < seq_len; ++t) {
         int best_idx = 0;
         float best_val = values[ctc_linear_index(t, 0, seq_len, vocab, vocab_major)];
+        float second_best_val = best_val;
+        float row_sum = values_are_prob ? best_val : 0.0f;
         for (int j = 1; j < vocab; ++j) {
             const float v = values[ctc_linear_index(t, j, seq_len, vocab, vocab_major)];
+            if (values_are_prob) {
+                row_sum += v;
+            }
             if (v > best_val) {
+                second_best_val = best_val;
                 best_val = v;
                 best_idx = j;
+            } else if (v > second_best_val) {
+                second_best_val = v;
             }
         }
 
-        const float best_prob = values_are_prob ? std::max(best_val, 0.0f) : fast_sigmoid(best_val);
+        const float best_prob = values_are_prob ? prob_like_confidence(best_val, row_sum)
+                                                : logit_margin_confidence(best_val, second_best_val);
         timestep_max_sum += best_prob;
 
         if (best_idx > 0 && best_idx != prev_idx) {
@@ -788,13 +928,12 @@ DecodeCandidate decode_ctc_layout_generic(const rknn_tensor_attr& attr,
                                           int seq_len,
                                           int vocab,
                                           const std::vector<std::string>& dict,
-                                          bool vocab_major) {
+                                          bool vocab_major,
+                                          bool values_are_prob) {
     DecodeCandidate candidate;
     if (raw == nullptr || seq_len <= 0 || vocab <= 1) {
         return candidate;
     }
-
-    const bool is_softmax_prob = std::string(attr.name).find("softmax") != std::string::npos;
 
     int prev_idx = 0;
     float score_sum = 0.0f;
@@ -804,15 +943,24 @@ DecodeCandidate decode_ctc_layout_generic(const rknn_tensor_attr& attr,
     for (int t = 0; t < seq_len; ++t) {
         int best_idx = 0;
         float best_val = tensor_value_as_f32(attr, raw, ctc_linear_index(t, 0, seq_len, vocab, vocab_major));
+        float second_best_val = best_val;
+        float row_sum = values_are_prob ? best_val : 0.0f;
         for (int j = 1; j < vocab; ++j) {
             const float v = tensor_value_as_f32(attr, raw, ctc_linear_index(t, j, seq_len, vocab, vocab_major));
+            if (values_are_prob) {
+                row_sum += v;
+            }
             if (v > best_val) {
+                second_best_val = best_val;
                 best_val = v;
                 best_idx = j;
+            } else if (v > second_best_val) {
+                second_best_val = v;
             }
         }
 
-        const float best_prob = is_softmax_prob ? std::max(best_val, 0.0f) : fast_sigmoid(best_val);
+        const float best_prob = values_are_prob ? prob_like_confidence(best_val, row_sum)
+                                                : logit_margin_confidence(best_val, second_best_val);
         timestep_max_sum += best_prob;
 
         if (best_idx > 0 && best_idx != prev_idx) {
@@ -867,9 +1015,30 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
         }
     }
 
-    const bool output_is_prob = std::string(attr.name).find("softmax") != std::string::npos;
+    const bool name_says_prob = tensor_name_looks_prob(attr);
 
     if (layout_known) {
+        const bool output_is_prob = name_says_prob || tensor_layout_looks_prob(attr, raw, seq_len, vocab, vocab_major);
+        if (ppocr_score_debug_enabled()) {
+            float row_sum0 = 0.0f;
+            float row_min0 = std::numeric_limits<float>::max();
+            float row_max0 = std::numeric_limits<float>::lowest();
+            for (int j = 0; j < vocab; ++j) {
+                const float v = tensor_value_as_f32(attr, raw, ctc_linear_index(0, j, seq_len, vocab, vocab_major));
+                row_sum0 += v;
+                row_min0 = std::min(row_min0, v);
+                row_max0 = std::max(row_max0, v);
+            }
+            VISIONG_LOG_INFO("PPOCR",
+                             "score_debug layout_known=1 vocab_major=" << vocab_major
+                                                                       << " name_says_prob=" << name_says_prob
+                                                                       << " output_is_prob=" << output_is_prob
+                                                                       << " row0_sum=" << row_sum0
+                                                                       << " row0_min=" << row_min0
+                                                                       << " row0_max=" << row_max0
+                                                                       << " type=" << attr.type
+                                                                       << " name=" << (attr.name ? attr.name : "<null>"));
+        }
         switch (attr.type) {
             case RKNN_TENSOR_FLOAT16:
                 return decode_ctc_layout_fp16(static_cast<const uint16_t*>(raw),
@@ -910,19 +1079,27 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
             default:
                 break;
         }
-        return decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, vocab_major).out;
+        return decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, vocab_major, output_is_prob).out;
     }
 
     DecodeCandidate a;
     DecodeCandidate b;
+    const bool output_is_prob_a = name_says_prob || tensor_layout_looks_prob(attr, raw, seq_len, vocab, false);
+    const bool output_is_prob_b = name_says_prob || tensor_layout_looks_prob(attr, raw, seq_len, vocab, true);
     switch (attr.type) {
         case RKNN_TENSOR_FLOAT16:
-            a = decode_ctc_layout_fp16(static_cast<const uint16_t*>(raw), seq_len, vocab, dict, false, output_is_prob);
-            b = decode_ctc_layout_fp16(static_cast<const uint16_t*>(raw), seq_len, vocab, dict, true, output_is_prob);
+            a = decode_ctc_layout_fp16(static_cast<const uint16_t*>(raw),
+                                       seq_len,
+                                       vocab,
+                                       dict,
+                                       false,
+                                       output_is_prob_a);
+            b = decode_ctc_layout_fp16(
+                static_cast<const uint16_t*>(raw), seq_len, vocab, dict, true, output_is_prob_b);
             break;
         case RKNN_TENSOR_FLOAT32:
-            a = decode_ctc_layout_fp32(static_cast<const float*>(raw), seq_len, vocab, dict, false, output_is_prob);
-            b = decode_ctc_layout_fp32(static_cast<const float*>(raw), seq_len, vocab, dict, true, output_is_prob);
+            a = decode_ctc_layout_fp32(static_cast<const float*>(raw), seq_len, vocab, dict, false, output_is_prob_a);
+            b = decode_ctc_layout_fp32(static_cast<const float*>(raw), seq_len, vocab, dict, true, output_is_prob_b);
             break;
         case RKNN_TENSOR_INT8:
             a = decode_ctc_layout_quantized(static_cast<const int8_t*>(raw),
@@ -932,7 +1109,7 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
                                             false,
                                             attr.scale,
                                             attr.zp,
-                                            output_is_prob);
+                                            output_is_prob_a);
             b = decode_ctc_layout_quantized(static_cast<const int8_t*>(raw),
                                             seq_len,
                                             vocab,
@@ -940,7 +1117,7 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
                                             true,
                                             attr.scale,
                                             attr.zp,
-                                            output_is_prob);
+                                            output_is_prob_b);
             break;
         case RKNN_TENSOR_UINT8:
             a = decode_ctc_layout_quantized(static_cast<const uint8_t*>(raw),
@@ -950,7 +1127,7 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
                                             false,
                                             attr.scale,
                                             attr.zp,
-                                            output_is_prob);
+                                            output_is_prob_a);
             b = decode_ctc_layout_quantized(static_cast<const uint8_t*>(raw),
                                             seq_len,
                                             vocab,
@@ -958,11 +1135,11 @@ DecodedText decode_ctc_output(const rknn_tensor_attr& attr, const void* raw, con
                                             true,
                                             attr.scale,
                                             attr.zp,
-                                            output_is_prob);
+                                            output_is_prob_b);
             break;
         default:
-            a = decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, false);
-            b = decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, true);
+            a = decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, false, output_is_prob_a);
+            b = decode_ctc_layout_generic(attr, raw, seq_len, vocab, dict, true, output_is_prob_b);
             break;
     }
 

@@ -140,6 +140,42 @@ def _friendly_video_error(exc):
     return text
 
 
+def load_text_chars_from_dict(dict_path):
+    dict_path = os.fspath(dict_path)
+    chars = []
+    seen = set()
+    try:
+        with open(dict_path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f):
+                token = line.rstrip("\r\n")
+                if line_no == 0:
+                    token = token.lstrip("\ufeff")
+                if not token:
+                    continue
+                for ch in token:
+                    if ch not in seen:
+                        seen.add(ch)
+                        chars.append(ch)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to load PPOCR dictionary chars from '{dict_path}': {exc}") from None
+
+    if not chars:
+        raise RuntimeError(f"PPOCR dictionary is empty: '{dict_path}'")
+    return "".join(chars)
+
+
+def set_text_font_for_dict(font_path="", dict_path="", glyph_budget=0):
+    if not hasattr(ImageBuffer, "set_text_font"):
+        raise RuntimeError("ImageBuffer.set_text_font is not available in this build")
+
+    dict_chars = ""
+    if dict_path:
+        dict_chars = load_text_chars_from_dict(dict_path)
+
+    ImageBuffer.set_text_font(font_path, dict_chars, int(max(0, glyph_budget)))
+    return dict_chars
+
+
 class VideoRecorder:
     """Simple video writer. Construct once, call write(frame), then close()."""
 
