@@ -465,7 +465,7 @@ void IVE::ensure_buffers(int width, int height) {
         
         // 4) Internal ST-corner control workspace. / 4）内部 ST 角点控制工作区。
         m_st_ctrl_mem = std::make_unique<IVE_MEM_INFO_S>();
-        size_t st_ctrl_mem_size = (size_t)width * height + sizeof(IVE_ST_CORNER_MEM_S) * 2;
+        size_t st_ctrl_mem_size = (size_t)calc_stride(width) * height + sizeof(IVE_ST_CORNER_MEM_S) * 2;
         if (create_mem_info(m_st_ctrl_mem.get(), st_ctrl_mem_size) != RK_SUCCESS) {
             throw std::runtime_error("IVE Failed to create st_ctrl_mem");
         }

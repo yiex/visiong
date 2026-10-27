@@ -359,6 +359,11 @@ std::vector<std::tuple<int, int>> IVE::st_corner(const ImageBuffer& src, uint16_
     stCornerCtrl.u16MaxCornerNum = std::min<uint16_t>(IVE_ST_MAX_CORNER_NUM, max_corners);
     stCornerCtrl.u16MinDist = min_dist;
 
+    // Invalidate initialized cache lines before DMA; the SDK's CPU unpacking requests write-only access.
+    // DMA 前失效初始化缓存；SDK 的 CPU 解包仅请求只写访问。
+    {
+        IveCpuAccess output_access(m_st_corner_info_mem->u64VirAddr);
+    }
     ret = RK_MPI_IVE_STCorner(&handle, m_img_u8c1_in1.get(), m_st_candi_corner_mem.get(), m_st_corner_info_mem.get(), &stCornerCtrl, RK_TRUE);
     if (ret != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_STCorner failed: " + std::to_string(ret));

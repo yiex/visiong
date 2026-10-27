@@ -17,14 +17,18 @@ cv2.setNumThreads(1)
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--output", type=Path, default=Path("ive_pipeline.json"))
 parser.add_argument("--repeat", type=int, default=1000)
+parser.add_argument("--resize-cycles", type=int, default=20)
 args = parser.parse_args()
-if args.repeat <= 0:
-    parser.error("--repeat must be positive")
+if args.repeat <= 0 or args.resize_cycles <= 0:
+    parser.error("--repeat and --resize-cycles must be positive")
 processor = vg.IVE()
 report = []
+frames = []
+expected_corners = []
 for width, height in [(320, 240), (322, 242), (640, 480)]:
     image, features = make_case(width, height)
     first = vg.ImageBuffer.from_numpy(image, "gray8")
+    frames.append(first)
     count = interrupt_count()
     corners = processor.st_corner(first, max_corners=80, min_dist=12)
     repeated = [
@@ -52,6 +56,7 @@ for width, height in [(320, 240), (322, 242), (640, 480)]:
         passed=valid and spacing >= 12 and len(set(repeated)) == 1,
     )
     report.append(row)
+    expected_corners.append(tuple(corners))
     print(json.dumps(row), flush=True)
     mask = (
         np.asarray(
@@ -152,5 +157,25 @@ for width, height in [(320, 240), (322, 242), (640, 480)]:
             )
         report.append(dict(name="point_counts", counts=counts, passed=True))
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+count = interrupt_count()
+failures = []
+for cycle in range(args.resize_cycles):
+    for image, expected in zip(frames, expected_corners):
+        for repeat in range(3):
+            corners = tuple(processor.st_corner(image, max_corners=80, min_dist=12))
+            if corners != expected or len(set(corners)) != len(corners):
+                failures.append(
+                    dict(cycle=cycle, size=[image.width, image.height], repeat=repeat)
+                )
+row = dict(
+    name="resized_corner_state",
+    calls=args.resize_cycles * 9,
+    failures=failures,
+    passed=not failures,
+    interrupts=interrupt_count() - count,
+)
+report.append(row)
+print(json.dumps(row), flush=True)
+args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
 if not all(row["passed"] and row.get("interrupts", 1) > 0 for row in report):
     raise SystemExit(1)

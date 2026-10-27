@@ -21,6 +21,10 @@ LK 使用四层硬件金字塔；两帧尺寸必须一致且至少为 64×64，�
 
 LK uses four hardware pyramid levels, matching image dimensions of at least 64×64 and up to 500 integer coordinates. Status is 0 on success and -1 on failure; divide S9.7 displacement by 128 for pixels. Successful local convergence does not guarantee the true motion, especially with large displacement, occlusion or repeated texture.
 
+角点工作区按图像步长分配。厂商在 DMA 后进行 CPU 解包时按只写模式同步；封装在提交前使已初始化的结果缓存失效，避免重复坐标。验证脚本包含反复变换尺寸的角点压力检查。
+
+Corner workspace follows image stride. The SDK uses write-only synchronization during CPU unpacking after DMA; the wrapper invalidates initialized output cache lines before submission to avoid duplicate coordinates. Validation includes corner stress tests across repeated dimension changes.
+
 | 格式 / Format | NumPy dtype | 布局 / Layout |
 |---|---|---|
 | `gray8` | `uint8` | H×W |
@@ -73,7 +77,7 @@ Run on a board with VisionG, vendor runtimes and OpenCV Python including the `vi
 python3 scripts/check_ive_components.py --loops 5
 python3 scripts/check_ive_formats.py
 python3 scripts/check_ive_advanced.py
-python3 scripts/check_ive_pipeline.py --repeat 1000
+python3 scripts/check_ive_pipeline.py --repeat 1000 --resize-cycles 100
 python3 scripts/compare_ive_optical_flow.py --loops 10 --output ive_flow.json
 ```
 
