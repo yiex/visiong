@@ -427,10 +427,14 @@ set(VISIONG_NPU_SRCS
     src/npu/yolo11.cpp
     src/npu/yolo11_pose.cpp
     src/npu/yolo11_seg.cpp
+    src/npu/yolo26.cpp
     src/npu/yolov5.cpp
     src/npu/internal/tracking/rknn_engine.cpp
     src/npu/internal/tracking/core.cpp
 )
+
+# Preserve threshold comparisons and finite checks. / 保持阈值边界比较与有限值检查的语义。
+set_source_files_properties(src/npu/yolo26.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
 
 set(VISIONG_PYTHON_BINDING_SRCS
     src/python/bind_audio.cpp

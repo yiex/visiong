@@ -67,6 +67,13 @@ jobs:
         run: |
           python3 ./scripts/check_asr_wrapper_guard.py
 
+      - name: Validate YOLO26 post-processing
+        run: |
+          g++ -std=c++17 -O3 -fno-fast-math -Isrc \
+            scripts/test_yolo26_decode.cpp -o test_yolo26_decode
+          ./test_yolo26_decode
+          rm test_yolo26_decode
+
       - name: Install host packages
         run: |
           sudo apt-get update

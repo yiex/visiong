@@ -8,6 +8,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = "LGPL-3.0-or-later"
+# Adapted files keep upstream licenses; see licenses/SOURCES.md. / 适配文件保留上游许可，来源见对应文档。
+UPSTREAM_LICENSES = {
+    "src/npu/yolo26.cpp": "Apache-2.0",
+    "src/npu/internal/yolo26_decode.h": "Apache-2.0",
+    "scripts/convert_yolo26.py": "Apache-2.0",
+    "include/visiong/uapi/visiong_hw.h": "GPL-2.0-only WITH Linux-syscall-note",
+    "scripts/build_visiong_hw_module.sh": "GPL-2.0-only",
+}
 DIRECTORIES = [
     ROOT / "src",
     ROOT / "include",
@@ -57,7 +65,8 @@ def main() -> int:
         if not tag_lines:
             problems.append(f"missing SPDX header: {rel}")
             continue
-        if not any(EXPECTED in line for line in tag_lines):
+        expected = UPSTREAM_LICENSES.get(rel.as_posix(), EXPECTED)
+        if not any(expected in line for line in tag_lines):
             problems.append(f"unexpected SPDX identifier in {rel}: {' | '.join(tag_lines)}")
 
     if problems:

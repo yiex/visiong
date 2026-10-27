@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # RV1106 KWS Performance And Porting Report
 
 ## Executive Summary

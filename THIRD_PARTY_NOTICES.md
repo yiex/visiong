@@ -17,6 +17,13 @@ Third-party components keep their original licenses and are not relicensed by LG
 | quirc | `3rdparty/quirc/` | ISC | QR code detection/decoding |
 | stb | `3rdparty/stb/` | MIT or Public Domain | image load/save helpers, local `LICENSE` included |
 | Nuklear | `3rdparty/nuklear/` | MIT or Public Domain | immediate-mode GUI, local `LICENSE` included |
+| Rockchip YOLO26 example | `src/npu/yolo26.cpp`, `src/npu/internal/yolo26_decode.h`, `scripts/convert_yolo26.py` | Apache-2.0 | Adapted from airockchip/rknn_model_zoo commit `837db8e992815ff8647eadb709f07067f4bc3a71`; original copyright retained, VisionG modifications identified in each file. License: `licenses/Apache-2.0.txt`. |
+
+The YOLO26 pretrained model is a separate Ultralytics artifact, not Rockchip's
+Apache-2.0 code. Its embedded metadata identifies AGPL-3.0 and Ultralytics as
+the author. Conversion to RKNN does not change the upstream model's license.
+Model origin, hashes, embedded metadata and license text accompany generated
+model artifacts. See `docs/YOLO26.md`.
 
 ## Project-owned replacements and glue
 

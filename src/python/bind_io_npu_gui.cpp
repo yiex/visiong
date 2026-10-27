@@ -282,6 +282,7 @@ void bind_npu(py::module_& m) {
         .value("YOLOV5", ModelType::YOLOV5)
         .value("RETINAFACE", ModelType::RETINAFACE)
         .value("FACENET", ModelType::FACENET)
+        .value("YOLO26", ModelType::YOLO26)
         .value("YOLO11", ModelType::YOLO11)
         .value("YOLO11_SEG", ModelType::YOLO11_SEG)
         .value("YOLO11_POSE", ModelType::YOLO11_POSE)
@@ -289,7 +290,7 @@ void bind_npu(py::module_& m) {
         .value("MLSD", ModelType::MLSD)
         .export_values();
 
-    py::class_<Detection>(m, "Detection", "Single detection from YOLOv5/RetinaFace/YOLO11/YOLO11_SEG/YOLO11_POSE inference.")
+    py::class_<Detection>(m, "Detection", "Single detection from YOLOv5/RetinaFace/YOLO26/YOLO11/YOLO11_SEG/YOLO11_POSE inference.")
         .def_readonly("box", &Detection::box, "Bounding box as (x, y, w, h).")
         .def_readonly("score", &Detection::score, "Confidence in [0, 1] (normalized from model output).")
         .def_readonly("class_id", &Detection::class_id, "Class index.")
@@ -326,7 +327,7 @@ void bind_npu(py::module_& m) {
         }),
         "model_type"_a, "model_path"_a, "label_path"_a = "",
         "box"_a = 0.25f, "nms"_a = 0.45f,
-	"Initializes NPU with model_type ('yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', 'mlsd'), model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45).")
+	"Initializes NPU with model_type ('yolov5', 'retinaface', 'facenet', 'yolo26', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', 'mlsd'), model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45; ignored for NMS-free YOLO26).")
 
         .def(py::init([](ModelType model_type,
                          const std::string& model_path,
@@ -337,13 +338,13 @@ void bind_npu(py::module_& m) {
         }),
         "model_type"_a, "model_path"_a, "label_path"_a = "",
         "box"_a = 0.25f, "nms"_a = 0.45f,
-        "Initializes NPU with ModelType enum, model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45).")
+        "Initializes NPU with ModelType enum, model_path, optional label_path, box_thresh (default 0.25), nms_thresh (default 0.45; ignored for NMS-free YOLO26).")
 
         .def("infer", &NPU::infer,
              "img_buf"_a, "roi"_a = std::make_tuple(0, 0, 0, 0),
              "model_format"_a = "rgb",
              py::call_guard<py::gil_scoped_release>(),
-             "Runs inference. For detection/pose models (YOLOv5, RetinaFace, YOLO11, YOLO11_SEG, YOLO11_POSE) returns a list of Detection. "
+             "Runs inference. For detection/pose models (YOLOv5, RetinaFace, YOLO26, YOLO11, YOLO11_SEG, YOLO11_POSE) returns a list of Detection. "
              "For FACENET use get_face_feature(); for LPRNET use recognize_plate(). model_format: 'rgb' or 'bgr'. "
              "Does not support grayscale input.")
 

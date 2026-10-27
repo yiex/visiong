@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # KWS RV1106 Worklog
 
 ## Goal

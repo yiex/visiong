@@ -1,5 +1,25 @@
 # License Source References
 
+## Rockchip YOLO26 integration (2026-10-27)
+
+- Upstream: https://github.com/airockchip/rknn_model_zoo
+- Exact revision: `837db8e992815ff8647eadb709f07067f4bc3a71`
+- Reference files: `examples/yolo26/cpp/postprocess.cc`,
+  `examples/yolo26/cpp/postprocess.h`, `examples/yolo26/python/convert.py`
+- Original copyright: Copyright (c) 2026 by Rockchip Electronics Co., Ltd.
+  All Rights Reserved.
+- License: Apache-2.0; full text retained at `licenses/Apache-2.0.txt`.
+- Modified files: `src/npu/yolo26.cpp`, `src/npu/internal/yolo26_decode.h`,
+  `scripts/convert_yolo26.py`. Changes: dynamic validated native tensor layouts,
+  INT8 NEON maximum reduction, deferred dequantization and class lookup,
+  deterministic partial TopK, existing VisionG runtime/ROI integration,
+  reproducible conversion and ONNX opset conversion verification.
+- New project-owned integration headers, dispatch/bindings and tests remain
+  LGPL-3.0-or-later. The adapted files retain Apache-2.0.
+- Pretrained weights/ONNX: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.onnx
+  Metadata: Ultralytics, version 8.4.38, AGPL-3.0. Generated model packages
+  retain the metadata, SHA256 and accompanying Ultralytics license separately.
+
 Collected on: 2026-03-13
 
 ## In-tree license texts

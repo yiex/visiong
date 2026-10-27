@@ -13,6 +13,7 @@ class ImageBuffer;
 class RgaDmaBuffer;
 struct YoloV5PostProcessCtx;
 struct Yolo11PostProcessCtx;
+struct Yolo26PostProcessCtx;
 struct Yolo11SegPostProcessCtx;
 struct Yolo11PosePostProcessCtx;
 
@@ -24,7 +25,8 @@ enum class ModelType {
     YOLO11_SEG,
     YOLO11_POSE,
     LPRNET,
-    MLSD
+    MLSD,
+    YOLO26
 };
 
 struct Detection {
@@ -99,6 +101,7 @@ private:
     bool m_initialized;
     YoloV5PostProcessCtx* m_yolov5_post_ctx = nullptr;
     Yolo11PostProcessCtx* m_yolo11_post_ctx = nullptr;
+    Yolo26PostProcessCtx* m_yolo26_post_ctx = nullptr;
     Yolo11SegPostProcessCtx* m_yolo11_seg_post_ctx = nullptr;
     Yolo11PosePostProcessCtx* m_yolo11_pose_post_ctx = nullptr;
     std::unique_ptr<RgaDmaBuffer> m_cached_infer_roi_dma;

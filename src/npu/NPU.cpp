@@ -8,6 +8,7 @@
 #include "im2d.h"
 #include "internal/models/yolov5.h"
 #include "internal/models/yolo11.h"
+#include "internal/models/yolo26.h"
 #include "internal/models/yolo11_seg.h"
 #include "internal/models/yolo11_pose.h"
 #include "internal/models/retinaface.h"
@@ -128,8 +129,11 @@ int clamp_to_image_edge(int value, int max_edge) {
 std::string detection_label(ModelType model_type, int class_id, const YoloV5PostProcessCtx* yolov5_ctx,
                             const Yolo11PostProcessCtx* yolo11_ctx,
                             const Yolo11SegPostProcessCtx* yolo11_seg_ctx,
-                            const Yolo11PosePostProcessCtx* yolo11_pose_ctx) {
+                            const Yolo11PosePostProcessCtx* yolo11_pose_ctx,
+                            const Yolo26PostProcessCtx* yolo26_ctx) {
     switch (model_type) {
+        case ModelType::YOLO26:
+            return coco_cls_to_name_yolo26(yolo26_ctx, class_id);
         case ModelType::YOLO11:
             return coco_cls_to_name_yolo11(yolo11_ctx, class_id);
         case ModelType::YOLO11_SEG:
@@ -155,6 +159,8 @@ int init_model_dispatch(ModelType model_type, const std::string& model_path, rkn
             return init_facenet_model(model_path.c_str(), app_ctx);
         case ModelType::YOLO11:
             return init_yolo11_model(model_path.c_str(), app_ctx);
+        case ModelType::YOLO26:
+            return init_yolo26_model(model_path.c_str(), app_ctx);
         case ModelType::YOLO11_SEG:
             return init_yolo11_seg_model(model_path.c_str(), app_ctx);
         case ModelType::YOLO11_POSE:
@@ -176,7 +182,8 @@ int init_postprocess_dispatch(ModelType model_type,
                               YoloV5PostProcessCtx** yolov5_ctx,
                               Yolo11PostProcessCtx** yolo11_ctx,
                               Yolo11SegPostProcessCtx** yolo11_seg_ctx,
-                              Yolo11PosePostProcessCtx** yolo11_pose_ctx) {
+                              Yolo11PosePostProcessCtx** yolo11_pose_ctx,
+                              Yolo26PostProcessCtx** yolo26_ctx) {
     if (yolov5_ctx) {
         *yolov5_ctx = nullptr;
     }
@@ -190,6 +197,7 @@ int init_postprocess_dispatch(ModelType model_type,
         *yolo11_pose_ctx = nullptr;
     }
 
+    if (yolo26_ctx) *yolo26_ctx = nullptr;
     const char* label_cstr = label_path.empty() ? nullptr : label_path.c_str();
     switch (model_type) {
         case ModelType::YOLOV5: {
@@ -202,6 +210,15 @@ int init_postprocess_dispatch(ModelType model_type,
             if (yolov5_ctx) {
                 *yolov5_ctx = ctx;
             }
+            return 0;
+        }
+        case ModelType::YOLO26: {
+            auto* ctx = create_yolo26_post_process_ctx(app_ctx, label_cstr, box_thresh);
+            if (ctx == nullptr || yolo26_ctx == nullptr) {
+                destroy_yolo26_post_process_ctx(ctx);
+                return -1;
+            }
+            *yolo26_ctx = ctx;
             return 0;
         }
         case ModelType::YOLO11: {
@@ -257,6 +274,8 @@ int release_model_dispatch(ModelType model_type, rknn_app_context_t* app_ctx) {
             return release_facenet_model(app_ctx);
         case ModelType::YOLO11:
             return release_yolo11_model(app_ctx);
+        case ModelType::YOLO26:
+            return release_yolo26_model(app_ctx);
         case ModelType::YOLO11_SEG:
             return release_yolo11_seg_model(app_ctx);
         case ModelType::YOLO11_POSE:
@@ -273,11 +292,16 @@ int release_model_dispatch(ModelType model_type, rknn_app_context_t* app_ctx) {
 void deinit_postprocess_dispatch(ModelType model_type, YoloV5PostProcessCtx*& yolov5_ctx,
                                  Yolo11PostProcessCtx*& yolo11_ctx,
                                  Yolo11SegPostProcessCtx*& yolo11_seg_ctx,
-                                 Yolo11PosePostProcessCtx*& yolo11_pose_ctx) {
+                                 Yolo11PosePostProcessCtx*& yolo11_pose_ctx,
+                                 Yolo26PostProcessCtx*& yolo26_ctx) {
     switch (model_type) {
         case ModelType::YOLOV5:
             destroy_yolov5_post_process_ctx(yolov5_ctx);
             yolov5_ctx = nullptr;
+            break;
+        case ModelType::YOLO26:
+            destroy_yolo26_post_process_ctx(yolo26_ctx);
+            yolo26_ctx = nullptr;
             break;
         case ModelType::YOLO11:
             destroy_yolo11_post_process_ctx(yolo11_ctx);
@@ -302,6 +326,7 @@ void run_detection_dispatch(ModelType model_type,
                             const Yolo11PostProcessCtx* yolo11_ctx,
                             const Yolo11SegPostProcessCtx* yolo11_seg_ctx,
                             const Yolo11PosePostProcessCtx* yolo11_pose_ctx,
+                            Yolo26PostProcessCtx* yolo26_ctx,
                             float scale,
                             int pad_x,
                             int pad_y,
@@ -315,6 +340,11 @@ void run_detection_dispatch(ModelType model_type,
         case ModelType::RETINAFACE:
             if (inference_retinaface_model(app_ctx, od_results) != 0) {
                 throw std::runtime_error("RetinaFace inference failed.");
+            }
+            return;
+        case ModelType::YOLO26:
+            if (inference_yolo26_model(app_ctx, yolo26_ctx, scale, pad_x, pad_y, od_results) != 0) {
+                throw std::runtime_error("YOLO26 inference failed.");
             }
             return;
         case ModelType::YOLO11:
@@ -333,7 +363,7 @@ void run_detection_dispatch(ModelType model_type,
             }
             return;
         default:
-            throw std::runtime_error("NPU::inference supports only YOLOV5/YOLO11/YOLO11_SEG/YOLO11_POSE/RETINAFACE. Use infer_lines() for MLSD.");
+            throw std::runtime_error("NPU::inference supports only YOLOV5/YOLO26/YOLO11/YOLO11_SEG/YOLO11_POSE/RETINAFACE. Use infer_lines() for MLSD.");
     }
 }
 
@@ -573,7 +603,7 @@ int NPU::initialize_runtime(bool print_log) {
     if (ret == 0) {
         ret = init_postprocess_dispatch(m_model_type, m_label_path, m_box_thresh, m_nms_thresh, m_app_ctx.get(),
                                         &m_yolov5_post_ctx, &m_yolo11_post_ctx, &m_yolo11_seg_post_ctx,
-                                        &m_yolo11_pose_post_ctx);
+                                        &m_yolo11_pose_post_ctx, &m_yolo26_post_ctx);
     }
     if (ret == 0) {
         m_initialized = true;
@@ -588,7 +618,7 @@ int NPU::initialize_runtime(bool print_log) {
     if (init_ret == 0) {
         release_model_dispatch(m_model_type, m_app_ctx.get());
         deinit_postprocess_dispatch(m_model_type, m_yolov5_post_ctx, m_yolo11_post_ctx, m_yolo11_seg_post_ctx,
-                                    m_yolo11_pose_post_ctx);
+                                    m_yolo11_pose_post_ctx, m_yolo26_post_ctx);
     }
     m_initialized = false;
     return ret;
@@ -597,12 +627,12 @@ int NPU::initialize_runtime(bool print_log) {
 void NPU::release_runtime() {
     if (!m_initialized) {
         deinit_postprocess_dispatch(m_model_type, m_yolov5_post_ctx, m_yolo11_post_ctx, m_yolo11_seg_post_ctx,
-                                m_yolo11_pose_post_ctx);
+                                m_yolo11_pose_post_ctx, m_yolo26_post_ctx);
         return;
     }
     release_model_dispatch(m_model_type, m_app_ctx.get());
     deinit_postprocess_dispatch(m_model_type, m_yolov5_post_ctx, m_yolo11_post_ctx, m_yolo11_seg_post_ctx,
-                                m_yolo11_pose_post_ctx);
+                                m_yolo11_pose_post_ctx, m_yolo26_post_ctx);
     m_initialized = false;
 }
 
@@ -698,13 +728,14 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
     const bool model_expects_rgb_bgr = (target_format == RK_FMT_RGB888 || target_format == RK_FMT_BGR888);
     const bool src_uploaded_from_cpu = (src_dma_ctx.uploaded_dma != nullptr);
 
+    const int padding = m_model_type == ModelType::YOLO26 ? 114 : 128;
     bool letterbox_done = false;
 
     if (src_is_yuv && model_expects_rgb_bgr && m_cached_direct_yuv_to_rgb_letterbox != 0) {
         try {
             rga_letterbox_op(*current_dma_buf,
                              npu_input_wrapper,
-                             std::make_tuple(128, 128, 128),
+                             std::make_tuple(padding, padding, padding),
                              src_uploaded_from_cpu,
                              false);
             letterbox_done = true;
@@ -749,7 +780,7 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
 
         rga_letterbox_op(*letterbox_src,
                          npu_input_wrapper,
-                         std::make_tuple(128, 128, 128),
+                         std::make_tuple(padding, padding, padding),
                          letterbox_src_cpu_dirty,
                          false);
     }
@@ -763,7 +794,7 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
 
     try {
         run_detection_dispatch(m_model_type, m_app_ctx.get(), m_yolov5_post_ctx, m_yolo11_post_ctx, m_yolo11_seg_post_ctx,
-                               m_yolo11_pose_post_ctx, scale, pad_x, pad_y, &od_results);
+                               m_yolo11_pose_post_ctx, m_yolo26_post_ctx, scale, pad_x, pad_y, &od_results);
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
         if (msg.find("inference failed") != std::string::npos && try_recover_runtime(msg.c_str())) {
@@ -777,7 +808,7 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
     // 7) Pack model outputs into API-level detection objects. / 7）把模型输出封装成 API 层检测对象。
     std::vector<Detection> detections;
     detections.reserve(od_results.count);
-    const bool has_native_xyxy = (m_model_type == ModelType::YOLO11 || m_model_type == ModelType::YOLO11_SEG);
+    const bool has_native_xyxy = (m_model_type == ModelType::YOLO26 || m_model_type == ModelType::YOLO11 || m_model_type == ModelType::YOLO11_SEG);
     const bool has_pose_keypoints = (m_model_type == ModelType::YOLO11_POSE);
     const int max_x = std::max(0, static_cast<int>(img_buf.width) - 1);
     const int max_y = std::max(0, static_cast<int>(img_buf.height) - 1);
@@ -810,7 +841,7 @@ std::vector<Detection> NPU::inference(const ImageBuffer& img_buf, const std::tup
             d.score = std::max(0.f, std::min(1.f, det->prop));
             d.class_id = det->cls_id;
             d.label = detection_label(m_model_type, det->cls_id, m_yolov5_post_ctx, m_yolo11_post_ctx,
-                                      m_yolo11_seg_post_ctx, m_yolo11_pose_post_ctx);
+                                      m_yolo11_seg_post_ctx, m_yolo11_pose_post_ctx, m_yolo26_post_ctx);
 
             if (m_model_type == ModelType::RETINAFACE) {
                 d.landmarks.reserve(5);

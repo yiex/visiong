@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # LowLevelNPU Keyword Spotting Tutorial
 
 This tutorial ports a mature keyword spotting pipeline to `visiong` and validates it on the target board with `LowLevelNPU`.

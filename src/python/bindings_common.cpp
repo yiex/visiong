@@ -102,6 +102,9 @@ ModelType parse_model_type(const std::string& model_type_str) {
     if (model_type == "facenet") {
         return ModelType::FACENET;
     }
+    if (model_type == "yolo26") {
+        return ModelType::YOLO26;
+    }
     if (model_type == "yolo11") {
         return ModelType::YOLO11;
     }
@@ -119,7 +122,7 @@ ModelType parse_model_type(const std::string& model_type_str) {
     }
     throw std::invalid_argument(
         "Unsupported model_type: '" + model_type_str +
-        "'. Use 'yolov5', 'retinaface', 'facenet', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', or 'mlsd'.");
+        "'. Use 'yolov5', 'retinaface', 'facenet', 'yolo26', 'yolo11', 'yolo11_seg', 'yolo11_pose', 'lprnet', or 'mlsd'.");
 }
 #endif
 
