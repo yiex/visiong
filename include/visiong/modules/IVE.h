@@ -28,9 +28,9 @@ private:
 
 // Raw LK optical flow output for one feature point. / 单个特征点的原始 LK 光流输出。
 struct IVEMotionVector {
-    int status = -1;   // 0: valid, negative: invalid/failure
-    short mv_x = 0;    // S9.7 fixed-point x displacement
-    short mv_y = 0;    // S9.7 fixed-point y displacement
+    int status = -1;   // 0: valid, -1: failed. / 0 表示有效，-1 表示跟踪失败。
+    short mv_x = 0;    // S9.7 x displacement; divide by 128. / S9.7 横向位移，除以 128 得到像素。
+    short mv_y = 0;    // S9.7 y displacement; divide by 128. / S9.7 纵向位移，除以 128 得到像素。
 };
 
 // Singleton wrapper for Rockchip IVE hardware operators. / Rockchip IVE 硬件算子的单例封装。
@@ -66,11 +66,11 @@ public:
     ImageBuffer integral(const ImageBuffer& src, IVE_INTEG_OUT_CTRL_E mode = IVE_INTEG_OUT_CTRL_COMBINE);
     std::vector<Blob> ccl(const ImageBuffer& src, int min_area = 100);
     double ncc(const ImageBuffer& src1, const ImageBuffer& src2);
-    ImageBuffer csc(const ImageBuffer& src, IVE_CSC_MODE_E mode);
+    ImageBuffer csc(const ImageBuffer& src, IVE_CSC_MODE_E mode, bool input_full_range = false);
 
     // Color-space conversion helpers. / 色彩空间转换辅助函数。
-    ImageBuffer yuv_to_rgb(const ImageBuffer& src, bool full_range = true);
-    ImageBuffer yuv_to_hsv(const ImageBuffer& src, bool full_range = true);
+    ImageBuffer yuv_to_rgb(const ImageBuffer& src, bool full_range = true, bool input_full_range = false);
+    ImageBuffer yuv_to_hsv(const ImageBuffer& src, bool full_range = true, bool input_full_range = false);
     ImageBuffer rgb_to_yuv(const ImageBuffer& src, bool full_range = true);
     ImageBuffer rgb_to_hsv(const ImageBuffer& src, bool full_range = true);
 
@@ -78,6 +78,7 @@ public:
     ImageBuffer dma(const ImageBuffer& src, IVE_DMA_MODE_E mode = IVE_DMA_MODE_DIRECT_COPY);
     ImageBuffer cast_8bit_to_8bit(const ImageBuffer& src, int8_t bias, uint8_t numerator, uint8_t denominator);
     ImageBuffer map(const ImageBuffer& src, const std::vector<uint8_t>& lut);
+    // Single-model hardware GMM; initialize each sequence with first_frame=true. / 单模型硬件 GMM；每段序列首帧需设为 true。
     std::tuple<ImageBuffer, ImageBuffer> gmm(const ImageBuffer& src, IVEModel& model, bool first_frame = false);
     std::tuple<ImageBuffer, ImageBuffer> gmm2(
         const ImageBuffer& src,
@@ -95,10 +96,9 @@ public:
         uint16_t max_corners = 200,
         uint16_t min_dist = 10,
         uint8_t quality_level = 25);
-    ImageBuffer match_bg_model(const ImageBuffer& current_img, IVEModel& bg_model, uint32_t frame_num);
-    ImageBuffer update_bg_model(
+    void match_bg_model(const ImageBuffer& current_img, IVEModel& bg_model, uint32_t frame_num);
+    std::tuple<ImageBuffer, ImageBuffer> update_bg_model(
         const ImageBuffer& current_img,
-        const ImageBuffer& fg_flag,
         IVEModel& bg_model,
         uint32_t frame_num);
     std::tuple<ImageBuffer, ImageBuffer> sad(
@@ -144,7 +144,10 @@ private:
     // Reused workspace / metadata buffers. / 复用的工作区 / 元数据缓冲区。
     std::unique_ptr<IVE_MEM_INFO_S> m_mem_info;
     std::unique_ptr<IVE_MEM_INFO_S> m_lk_pts_mem;
-    std::unique_ptr<IVE_MEM_INFO_S> m_lk_mv_mem;
+    std::unique_ptr<IVE_MEM_INFO_S> m_lk_next_pts_mem;
+    std::unique_ptr<IVE_MEM_INFO_S> m_lk_status_mem;
+    std::unique_ptr<IVE_MEM_INFO_S> m_lk_error_mem;
+    std::unique_ptr<IVE_MEM_INFO_S> m_lk_pyramid_mem;
     std::unique_ptr<IVE_MEM_INFO_S> m_st_candi_corner_mem;
     std::unique_ptr<IVE_MEM_INFO_S> m_st_corner_info_mem;
     std::unique_ptr<IVE_MEM_INFO_S> m_st_ctrl_mem;

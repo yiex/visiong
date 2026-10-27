@@ -29,6 +29,7 @@ visiong 库并未进行功能限制、绑定和收费。任何使用了 Luckfox 
 - 硬件加速的格式转换、缩放、裁切、letterbox、绘制等图像操作
 - Rockchip NPU 的 Python 封装与后处理辅助
 - [YOLO26 one2one 检测](docs/YOLO26.md)：沿用 NPU 接口，支持 INT8/NEON 后处理，无需 NMS
+- [IVE 硬件图像处理](docs/IVE.md)：金字塔 LK 光流、格式转换、整数算子与背景模型
 - 面向板端脚本、快速验证和部署的 Python 绑定
 
 ## 开发板上 Python 部署方式
@@ -308,6 +309,7 @@ Any RV1103 / RV1106 development board can use VisionG and the vigide plugin as l
 - Hardware-accelerated image operations such as format conversion, resize, crop, letterbox, and drawing
 - Python bindings for the Rockchip NPU plus post-processing helpers
 - [YOLO26 one2one detection](docs/YOLO26.md): shared NPU API with INT8/NEON post-processing and no NMS
+- [IVE hardware image processing](docs/IVE.md): pyramidal LK, color conversion, integer operators and background models
 - Python bindings intended for on-board scripting, rapid validation, and deployment
 
 ## Python Deployment on the Board

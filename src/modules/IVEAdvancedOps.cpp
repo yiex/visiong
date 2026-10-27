@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "visiong/modules/IVE.h"
 #include "visiong/common/pixel_format.h"
+#include "visiong/core/BufferStateMachine.h"
 
 #include "modules/internal/ive_memory.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <tuple>
@@ -22,10 +24,6 @@ using visiong::ive_internal::mmz_flush_end;
 using visiong::ive_internal::mmz_flush_start;
 using visiong::ive_internal::mmz_free;
 
-#ifndef RK_FMT_U16C1
-#define RK_FMT_U16C1 static_cast<PIXEL_FORMAT_E>(0x1002)
-#endif
-
 struct IveMmzGuard {
     RK_U64 phy = 0;
     RK_U64 vir = 0;
@@ -40,13 +38,100 @@ struct IveMmzGuard {
     }
 };
 
-constexpr int kLkInputPointShift = 2;
+constexpr int kLkCoordinateScale = 128;
 
-void flush_mmz_cache_by_vir_addr(RK_U64 vir_addr, bool cpu_to_device) {
-    MB_BLK blk = RK_MPI_MB_VirAddr2Handle(reinterpret_cast<void*>(vir_addr));
-    if (blk != MB_INVALID_HANDLE) {
-        RK_MPI_SYS_MmzFlushCache(blk, cpu_to_device ? RK_TRUE : RK_FALSE);
+RK_U32 lk_pyramid_workspace_size(RK_U32 width, RK_U32 height) {
+    // Match the per-level strides used by Pyramid_Create. / 按 Pyramid_Create 的逐层步长计算空间。
+    RK_U64 bytes = static_cast<RK_U64>(calc_stride(width)) * height;
+    for (unsigned level = 0; level <= 3; ++level) {
+        const RK_U32 w = level ? (width + 1) >> level : width;
+        const RK_U32 h = level ? (height + 1) >> level : height;
+        bytes += static_cast<RK_U64>(calc_stride(w)) * h;
     }
+    bytes = (bytes + kImageAlign - 1) & ~static_cast<RK_U64>(kImageAlign - 1);
+    if (bytes > std::numeric_limits<RK_U32>::max() / 2) {
+        throw std::invalid_argument("LKOpticalFlow: Pyramid workspace is too large.");
+    }
+    return static_cast<RK_U32>(bytes);
+}
+
+class IveCpuAccess {
+public:
+    explicit IveCpuAccess(RK_U64 address) : address_(reinterpret_cast<void*>(address)) {
+        if (mmz_flush_start(address_) != RK_SUCCESS) {
+            throw std::runtime_error("IVE: Failed to begin memory buffer access.");
+        }
+    }
+    ~IveCpuAccess() { mmz_flush_end(address_); }
+    IveCpuAccess(const IveCpuAccess&) = delete;
+    IveCpuAccess& operator=(const IveCpuAccess&) = delete;
+private:
+    void* address_;
+};
+
+template <typename Control>
+void initialize_gmm_control(Control& control, bool first_frame) {
+    // The public API updates model memory in place; use fixed-size single-model records.
+    // 公开接口原地更新模型内存；使用固定长度的单模型记录。
+    control.u8FirstFrameFlag = first_frame ? 1 : 0;
+    control.u8EnBgOut = 1;
+    control.u8MaxModelNum = 1;
+    control.u8UpdateVar = 1;
+    control.u8q2WeightInitVal = 16;
+    control.u8q2WeightAddFactor = 4;
+    control.u8q2WeightReduFactor = 1016;
+    control.u8q2WeightThr = 4;
+    control.u8VarThreshGen = 9;
+    control.u8q2BgRatio = 712;
+    control.u10q0InitVar = 225;
+    control.u10q0MinVar = 200;
+    control.u10q0MaxVar = 512;
+    control.u8VarThr = 16;
+}
+
+void validate_gmm_model(const IVEModel& model, int width, int height) {
+    const RK_U64 required = static_cast<RK_U64>(calc_stride(width)) * height * 4 + sizeof(IVE_GMM_NUM_INFO_S);
+    if (model.mem_info.u32Size < required) throw std::invalid_argument("GMM model buffer is too small.");
+}
+
+IVE_DATA_S background_model_data(const IVEModel& model, int width, int height) {
+    const RK_U32 row_bytes = width * sizeof(IVE_BG_MODEL_PIX_S);
+    const RK_U32 stride = calc_stride(row_bytes);
+    if (model.mem_info.u32Size < static_cast<RK_U64>(stride) * height) {
+        throw std::invalid_argument("Background model buffer is too small.");
+    }
+    IVE_DATA_S data{};
+    data.u64PhyAddr = model.mem_info.u64PhyAddr;
+    data.u64VirAddr = model.mem_info.u64VirAddr;
+    data.u32Width = row_bytes;
+    data.u32Height = height;
+    data.u32Stride = stride;
+    return data;
+}
+
+const ImageBuffer& background_frame(const ImageBuffer& source, std::unique_ptr<ImageBuffer>& holder) {
+    const int width = calc_stride(source.width);
+    const int height = calc_stride(source.height);
+    if (width == source.width && height == source.height) return source;
+    visiong::bufstate::prepare_cpu_read(source);
+    std::vector<unsigned char> bytes(static_cast<size_t>(width) * height, 0);
+    for (int y = 0; y < source.height; ++y) {
+        std::memcpy(bytes.data() + static_cast<size_t>(y) * width,
+                static_cast<const unsigned char*>(source.get_data()) + static_cast<size_t>(y) * source.w_stride, source.width);
+    }
+    holder = std::make_unique<ImageBuffer>(width, height, visiong::kGray8Format, std::move(bytes));
+    return *holder;
+}
+
+ImageBuffer widen_gradient(const IVE_IMAGE_S& image) {
+    std::vector<unsigned char> bytes(static_cast<size_t>(image.u32Width) * image.u32Height * sizeof(int16_t));
+    auto* target = reinterpret_cast<int16_t*>(bytes.data());
+    IveCpuAccess access(image.au64VirAddr[0]);
+    for (RK_U32 y = 0; y < image.u32Height; ++y) {
+        const auto* row = reinterpret_cast<const int8_t*>(image.au64VirAddr[0]) + static_cast<size_t>(y) * image.au32Stride[0];
+        for (RK_U32 x = 0; x < image.u32Width; ++x) target[static_cast<size_t>(y) * image.u32Width + x] = row[x];
+    }
+    return ImageBuffer(image.u32Width, image.u32Height, visiong::kS16C1Format, std::move(bytes));
 }
 
 const ImageBuffer& ensure_gray_input(const ImageBuffer& src, std::unique_ptr<ImageBuffer>& holder) {
@@ -64,11 +149,11 @@ std::tuple<ImageBuffer, ImageBuffer> IVE::gmm(const ImageBuffer& src, IVEModel& 
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("GMM requires a GRAY8 source image.");
     copy_to_ive_buffer(src, m_img_u8c1_in1.get());
-    IVE_GMM_CTRL_S stCtrl; memset(&stCtrl, 0, sizeof(stCtrl));
-    stCtrl.u8FirstFrameFlag = first_frame ? 1 : 0;
-    stCtrl.u8MaxModelNum = 3; stCtrl.u10q0InitVar = 300; stCtrl.u10q0MinVar = 50; stCtrl.u8q2WeightInitVal = 5; stCtrl.u8VarThreshGen = 4;
+    validate_gmm_model(model, src.width, src.height);
+    IVE_GMM_CTRL_S stCtrl{};
+    initialize_gmm_control(stCtrl, first_frame);
     IVE_HANDLE handle;
-    RK_S32 s32Ret = RK_MPI_IVE_GMM(&handle, m_img_u8c1_in1.get(), m_img_u8c1_out1.get(), m_img_u8c1_out2.get(), nullptr, &model.mem_info, &stCtrl, RK_TRUE);
+    RK_S32 s32Ret = RK_MPI_IVE_GMM(&handle, m_img_u8c1_in1.get(), m_img_u8c1_out1.get(), m_img_u8c1_out2.get(), m_img_u8c1_in2.get(), &model.mem_info, &stCtrl, RK_TRUE);
     if (s32Ret != RK_SUCCESS) throw std::runtime_error("RK_MPI_IVE_GMM failed with error code: " + std::to_string(s32Ret));
     return std::make_tuple(copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height), copy_from_ive_buffer(m_img_u8c1_out2.get(), m_width, m_height));
 }
@@ -76,14 +161,15 @@ std::tuple<ImageBuffer, ImageBuffer> IVE::gmm(const ImageBuffer& src, IVEModel& 
 std::tuple<ImageBuffer, ImageBuffer> IVE::gmm2(const ImageBuffer& src, const ImageBuffer& factor, IVEModel& model, bool first_frame) {
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src.width, src.height);
-    if (src.format != visiong::kGray8Format || factor.format != RK_FMT_U16C1) throw std::invalid_argument("GMM2 requires GRAY8 source and U16C1 factor images.");
+    if (src.format != visiong::kGray8Format || factor.format != visiong::kU16C1Format) throw std::invalid_argument("GMM2 requires GRAY8 source and U16C1 factor images.");
     copy_to_ive_buffer(src, m_img_u8c1_in1.get());
     copy_to_ive_buffer(factor, m_img_u16c1_in1.get());
-    IVE_GMM2_CTRL_S stCtrl; memset(&stCtrl, 0, sizeof(stCtrl));
-    stCtrl.u8FirstFrameFlag = first_frame ? 1 : 0;
-    stCtrl.u8MaxModelNum = 3; stCtrl.u10q0InitVar = 300; stCtrl.u10q0MinVar = 50; stCtrl.u8q2WeightInitVal = 5; stCtrl.u8VarThreshGen = 4;
+    validate_gmm_model(model, src.width, src.height);
+    IVE_GMM2_CTRL_S stCtrl{};
+    initialize_gmm_control(stCtrl, first_frame);
+    stCtrl.u8UseVarFactor = 1;
     IVE_HANDLE handle;
-    RK_S32 s32Ret = RK_MPI_IVE_GMM2(&handle, m_img_u8c1_in1.get(), (IVE_SRC_IMAGE_S*)m_img_u16c1_in1.get(), m_img_u8c1_out1.get(), m_img_u8c1_out2.get(), nullptr, &model.mem_info, &stCtrl, RK_TRUE);
+    RK_S32 s32Ret = RK_MPI_IVE_GMM2(&handle, m_img_u8c1_in1.get(), (IVE_SRC_IMAGE_S*)m_img_u16c1_in1.get(), m_img_u8c1_out1.get(), m_img_u8c1_out2.get(), m_img_u8c1_in2.get(), &model.mem_info, &stCtrl, RK_TRUE);
     if (s32Ret != RK_SUCCESS) throw std::runtime_error("RK_MPI_IVE_GMM2 failed with error code: " + std::to_string(s32Ret));
     return std::make_tuple(copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height), copy_from_ive_buffer(m_img_u8c1_out2.get(), m_width, m_height));
 }
@@ -125,11 +211,15 @@ std::tuple<ImageBuffer, ImageBuffer> IVE::norm_grad(const ImageBuffer& src) {
     stCtrl.enOutCtrl = IVE_NORM_GRAD_OUT_CTRL_HOR_AND_VER; stCtrl.u8Norm = 7;
     const RK_S8 mask[25] = { -1, -2, 0, 2, 1, -4, -8, 0, 8, 4, -6, -12, 0, 12, 6, -4, -8, 0, 8, 4, -1, -2, 0, 2, 1 };
     memcpy(stCtrl.as8Mask, mask, sizeof(mask));
+    IVE_IMAGE_S horizontal = *m_img_u8c1_out1;
+    IVE_IMAGE_S vertical = *m_img_u8c1_out2;
+    horizontal.enType = IVE_IMAGE_TYPE_S8C1;
+    vertical.enType = IVE_IMAGE_TYPE_S8C1;
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_NormGrad(&handle, m_img_u8c1_in1.get(), (IVE_DST_IMAGE_S*)m_img_s16c1_out1.get(), (IVE_DST_IMAGE_S*)m_img_s16c1_out2.get(), nullptr, &stCtrl, RK_TRUE) != RK_SUCCESS) {
+    if (RK_MPI_IVE_NormGrad(&handle, m_img_u8c1_in1.get(), &horizontal, &vertical, nullptr, &stCtrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_NormGrad failed.");
     }
-    return std::make_tuple(copy_from_ive_buffer(m_img_s16c1_out1.get(), m_width, m_height), copy_from_ive_buffer(m_img_s16c1_out2.get(), m_width, m_height));
+    return std::make_tuple(widen_gradient(horizontal), widen_gradient(vertical));
 }
 
 std::vector<IVEMotionVector> IVE::lk_optical_flow(const ImageBuffer& prev_img, const ImageBuffer& next_img, const std::vector<std::tuple<int, int>>& points) {
@@ -143,8 +233,27 @@ std::vector<IVEMotionVector> IVE::lk_optical_flow(const ImageBuffer& prev_img, c
     if (points.size() > LK_OPTICAL_FLOW_MAX_POINT_NUM) {
         throw std::invalid_argument("LKOpticalFlow: Too many points (Max " + std::to_string(LK_OPTICAL_FLOW_MAX_POINT_NUM) + ").");
     }
+    for (const auto& point : points) {
+        const int x = std::get<0>(point);
+        const int y = std::get<1>(point);
+        if (x < 0 || y < 0 || x >= prev_img.width || y >= prev_img.height) {
+            throw std::invalid_argument("LKOpticalFlow: Points must lie inside the source image.");
+        }
+    }
 
     ensure_buffers(prev_img.width, prev_img.height);
+
+    if (prev_img.width < 64 || prev_img.height < 64) {
+        throw std::invalid_argument("LKOpticalFlow: Four pyramid levels require images of at least 64x64.");
+    }
+    const RK_U32 pyramid_size = lk_pyramid_workspace_size(prev_img.width, prev_img.height);
+    if (!m_lk_pyramid_mem) {
+        auto workspace = std::make_unique<IVE_MEM_INFO_S>();
+        if (create_mem_info(workspace.get(), pyramid_size * 2) != RK_SUCCESS) {
+            throw std::runtime_error("LKOpticalFlow: Failed to allocate pyramid workspace.");
+        }
+        m_lk_pyramid_mem = std::move(workspace);
+    }
 
     std::unique_ptr<ImageBuffer> prev_holder;
     std::unique_ptr<ImageBuffer> next_holder;
@@ -154,44 +263,66 @@ std::vector<IVEMotionVector> IVE::lk_optical_flow(const ImageBuffer& prev_img, c
     copy_to_ive_buffer(prev_gray, m_img_u8c1_in1.get());
     copy_to_ive_buffer(next_gray, m_img_u8c1_in2.get());
 
-    // IVE expects U14.2 fixed-point coordinates. / IVE 期望 U14.2 定点坐标。
-    IVE_POINT_U16_S* prev_pts = reinterpret_cast<IVE_POINT_U16_S*>(m_lk_pts_mem->u64VirAddr);
-    for (size_t i = 0; i < points.size(); ++i) {
-        prev_pts[i].u16X = static_cast<RK_U16>(std::get<0>(points[i]) << kLkInputPointShift);
-        prev_pts[i].u16Y = static_cast<RK_U16>(std::get<1>(points[i]) << kLkInputPointShift);
+    // End CPU access before submitting DMA, including freshly initialized outputs.
+    // 提交 DMA 前结束 CPU 访问，新初始化的输出缓冲区也需同步。
+    {
+        IveCpuAccess input_access(m_lk_pts_mem->u64VirAddr);
+        auto* coordinates = reinterpret_cast<IVE_POINT_S25Q7_S*>(m_lk_pts_mem->u64VirAddr);
+        for (size_t i = 0; i < points.size(); ++i) {
+            coordinates[i].s25q7X = static_cast<IVE_S25Q7>(std::get<0>(points[i])) * kLkCoordinateScale;
+            coordinates[i].s25q7Y = static_cast<IVE_S25Q7>(std::get<1>(points[i])) * kLkCoordinateScale;
+        }
+    }
+    for (const auto* memory : {m_lk_next_pts_mem.get(), m_lk_status_mem.get(), m_lk_error_mem.get()}) {
+        IveCpuAccess output_access(memory->u64VirAddr);
+        std::memset(reinterpret_cast<void*>(memory->u64VirAddr), 0, memory->u32Size);
     }
 
-    flush_mmz_cache_by_vir_addr(m_lk_pts_mem->u64VirAddr, true);
-    std::memset(reinterpret_cast<void*>(m_lk_mv_mem->u64VirAddr), 0, m_lk_mv_mem->u32Size);
-
-    IVE_LK_OPTICAL_FLOW_CTRL_S stCtrl;
-    std::memset(&stCtrl, 0, sizeof(stCtrl));
-    stCtrl.u16PtsNum = static_cast<RK_U16>(points.size());
-    stCtrl.u0q8MinEigThr = 100;
-    stCtrl.u8IterCnt = 20;
-    stCtrl.u0q11Eps = 32;
-
-    IVE_HANDLE handle;
-    const RK_S32 ret = RK_MPI_IVE_LKOpticalFlow(&handle, m_img_u8c1_in1.get(), m_img_u8c1_in2.get(),
-                                          m_lk_pts_mem.get(), m_lk_mv_mem.get(), &stCtrl, RK_TRUE);
-
+    IVE_IMAGE_S previous_pyramid[4]{};
+    IVE_IMAGE_S current_pyramid[4]{};
+    IVE_PYRAMID_CTRL_S pyramid_ctrl{};
+    pyramid_ctrl.level = 3;
+    pyramid_ctrl.stPyramidMem = *m_lk_pyramid_mem;
+    pyramid_ctrl.stPyramidMem.u32Size = pyramid_size;
+    IVE_HANDLE handle{};
+    RK_S32 ret = RK_MPI_IVE_Pyramid_Create(&handle, m_img_u8c1_in1.get(), previous_pyramid, &pyramid_ctrl, true);
     if (ret != RK_SUCCESS) {
-        throw std::runtime_error("RK_MPI_IVE_LKOpticalFlow failed: " + std::to_string(ret));
+        throw std::runtime_error("LKOpticalFlow: Failed to build the previous pyramid: " + std::to_string(ret));
+    }
+    pyramid_ctrl.stPyramidMem.u64PhyAddr += pyramid_size;
+    pyramid_ctrl.stPyramidMem.u64VirAddr += pyramid_size;
+    ret = RK_MPI_IVE_Pyramid_Create(&handle, m_img_u8c1_in2.get(), current_pyramid, &pyramid_ctrl, true);
+    if (ret != RK_SUCCESS) {
+        throw std::runtime_error("LKOpticalFlow: Failed to build the current pyramid: " + std::to_string(ret));
     }
 
-    flush_mmz_cache_by_vir_addr(m_lk_mv_mem->u64VirAddr, false);
+    IVE_LK_OPTICAL_FLOW_PYR_CTRL_S control{};
+    control.enOutMode = IVE_LK_OPTICAL_FLOW_PYR_OUT_MODE_BOTH;
+    control.u16PtsNum = static_cast<RK_U16>(points.size());
+    control.u8MaxLevel = 3;
+    control.u0q8MinEigThr = 100;
+    control.u8IterCnt = 20;
+    control.u0q11Eps = 32;
+    ret = RK_MPI_IVE_LKOpticalFlowPyr(&handle, previous_pyramid, current_pyramid,
+            m_lk_pts_mem.get(), m_lk_next_pts_mem.get(), m_lk_status_mem.get(), m_lk_error_mem.get(), &control, true);
+    if (ret != RK_SUCCESS) {
+        throw std::runtime_error("RK_MPI_IVE_LKOpticalFlowPyr failed: " + std::to_string(ret));
+    }
 
     std::vector<IVEMotionVector> results;
     results.reserve(points.size());
-
-    // IVE_MV_S16_S matches LK output memory layout. / IVE_MV_S16_S 与 LK 输出内存布局一致。
-    IVE_MV_S16_S* motion = reinterpret_cast<IVE_MV_S16_S*>(m_lk_mv_mem->u64VirAddr);
+    IveCpuAccess next_access(m_lk_next_pts_mem->u64VirAddr);
+    IveCpuAccess status_access(m_lk_status_mem->u64VirAddr);
+    const auto* tracked = reinterpret_cast<const IVE_POINT_S25Q7_S*>(m_lk_next_pts_mem->u64VirAddr);
+    const auto* status = reinterpret_cast<const RK_U8*>(m_lk_status_mem->u64VirAddr);
     for (size_t i = 0; i < points.size(); ++i) {
-        results.push_back({
-            static_cast<int>(motion[i].s32Statys),
-            static_cast<short>(motion[i].s16X),
-            static_cast<short>(motion[i].s16Y)
-        });
+        const int64_t dx = static_cast<int64_t>(tracked[i].s25q7X) - std::get<0>(points[i]) * kLkCoordinateScale;
+        const int64_t dy = static_cast<int64_t>(tracked[i].s25q7Y) - std::get<1>(points[i]) * kLkCoordinateScale;
+        const bool valid = status[i] == 1 &&
+                dx >= std::numeric_limits<short>::min() && dx <= std::numeric_limits<short>::max() &&
+                dy >= std::numeric_limits<short>::min() && dy <= std::numeric_limits<short>::max();
+        results.push_back({valid ? 0 : -1, valid ? static_cast<short>(dx) : short{0},
+                          valid ? static_cast<short>(dy) : short{0}});
     }
 
     return results;
@@ -204,8 +335,10 @@ std::vector<std::tuple<int, int>> IVE::st_corner(const ImageBuffer& src, uint16_
     std::unique_ptr<ImageBuffer> src_holder;
     const ImageBuffer& gray = ensure_gray_input(src, src_holder);
     copy_to_ive_buffer(gray, m_img_u8c1_in1.get());
-    std::memset(reinterpret_cast<void*>(m_st_candi_corner_mem->u64VirAddr), 0, m_st_candi_corner_mem->u32Size);
-    std::memset(reinterpret_cast<void*>(m_st_corner_info_mem->u64VirAddr), 0, m_st_corner_info_mem->u32Size);
+    for (const auto* memory : {m_st_candi_corner_mem.get(), m_st_corner_info_mem.get()}) {
+        IveCpuAccess access(memory->u64VirAddr);
+        std::memset(reinterpret_cast<void*>(memory->u64VirAddr), 0, memory->u32Size);
+    }
 
     IVE_HANDLE handle;
     RK_S32 ret = RK_SUCCESS;
@@ -220,9 +353,6 @@ std::vector<std::tuple<int, int>> IVE::st_corner(const ImageBuffer& src, uint16_
         throw std::runtime_error("RK_MPI_IVE_STCandiCorner failed: " + std::to_string(ret));
     }
 
-    // Ensure candidate corners are visible to the following hardware stage. / 确保候选角点对后续硬件阶段可见。
-    flush_mmz_cache_by_vir_addr(m_st_candi_corner_mem->u64VirAddr, true);
-
     IVE_ST_CORNER_CTRL_S stCornerCtrl;
     std::memset(&stCornerCtrl, 0, sizeof(stCornerCtrl));
     stCornerCtrl.stMem = *m_st_ctrl_mem.get();
@@ -234,7 +364,7 @@ std::vector<std::tuple<int, int>> IVE::st_corner(const ImageBuffer& src, uint16_
         throw std::runtime_error("RK_MPI_IVE_STCorner failed: " + std::to_string(ret));
     }
 
-    flush_mmz_cache_by_vir_addr(m_st_corner_info_mem->u64VirAddr, false);
+    IveCpuAccess corner_access(m_st_corner_info_mem->u64VirAddr);
 
     const IVE_ST_CORNER_INFO_S* corner_info =
         reinterpret_cast<const IVE_ST_CORNER_INFO_S*>(m_st_corner_info_mem->u64VirAddr);
@@ -248,20 +378,18 @@ std::vector<std::tuple<int, int>> IVE::st_corner(const ImageBuffer& src, uint16_
     return result_points;
 }
 
-ImageBuffer IVE::match_bg_model(const ImageBuffer& current_img, IVEModel& bg_model, uint32_t frame_num) {
+void IVE::match_bg_model(const ImageBuffer& current_img, IVEModel& bg_model, uint32_t frame_num) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(current_img.width, current_img.height);
-    copy_to_ive_buffer(current_img, m_img_u8c1_in1.get());
-    IVE_DATA_S stBgModel;
-    memset(&stBgModel, 0, sizeof(stBgModel));
-    stBgModel.u64PhyAddr = bg_model.mem_info.u64PhyAddr;
-    stBgModel.u64VirAddr = bg_model.mem_info.u64VirAddr;
-    stBgModel.u32Stride = static_cast<RK_U32>(current_img.width);
-    stBgModel.u32Width = static_cast<RK_U32>(current_img.width);
-    stBgModel.u32Height = static_cast<RK_U32>(current_img.height);
+    if (current_img.format != visiong::kGray8Format) throw std::invalid_argument("Background modeling requires GRAY8 input.");
+    std::unique_ptr<ImageBuffer> holder;
+    const auto& frame = background_frame(current_img, holder);
+    ensure_buffers(frame.width, frame.height);
+    copy_to_ive_buffer(frame, m_img_u8c1_in1.get());
+    IVE_DATA_S stBgModel = background_model_data(bg_model, frame.width, frame.height);
     IVE_MATCH_BG_MODEL_CTRL_S stCtrl;
     memset(&stCtrl, 0, sizeof(stCtrl));
     stCtrl.u32CurFrmNum = frame_num; 
+    stCtrl.u8CodeWordNum = 3;
     stCtrl.u8DiffMaxThr = 10; 
     stCtrl.u8DiffMinThr = 10; 
     stCtrl.u8TrainTimeThr = 20;
@@ -270,28 +398,24 @@ ImageBuffer IVE::match_bg_model(const ImageBuffer& current_img, IVEModel& bg_mod
     if (RK_MPI_IVE_MatchBgModel(&handle, m_img_u8c1_in1.get(), &stBgModel, &stCtrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_MatchBgModel failed.");
     }
-    return ImageBuffer();
 }
 
-ImageBuffer IVE::update_bg_model(const ImageBuffer& current_img, const ImageBuffer& fg_flag, IVEModel& bg_model, uint32_t frame_num) {
+std::tuple<ImageBuffer, ImageBuffer> IVE::update_bg_model(const ImageBuffer& current_img, IVEModel& bg_model, uint32_t frame_num) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(current_img.width, current_img.height);
-    copy_to_ive_buffer(current_img, m_img_u8c1_in1.get());
-    copy_to_ive_buffer(fg_flag, m_img_u8c1_in2.get());
-    IVE_DATA_S stBgModel;
-    memset(&stBgModel, 0, sizeof(stBgModel));
-    stBgModel.u64PhyAddr = bg_model.mem_info.u64PhyAddr;
-    stBgModel.u64VirAddr = bg_model.mem_info.u64VirAddr;
-    stBgModel.u32Stride = static_cast<RK_U32>(current_img.width);
-    stBgModel.u32Width = static_cast<RK_U32>(current_img.width);
-    stBgModel.u32Height = static_cast<RK_U32>(current_img.height);
+    if (current_img.format != visiong::kGray8Format) throw std::invalid_argument("Background modeling requires GRAY8 input.");
+    std::unique_ptr<ImageBuffer> holder;
+    const auto& frame = background_frame(current_img, holder);
+    ensure_buffers(frame.width, frame.height);
+    copy_to_ive_buffer(frame, m_img_u8c1_in1.get());
+    IVE_DATA_S stBgModel = background_model_data(bg_model, frame.width, frame.height);
     IVE_UPDATE_BG_MODEL_CTRL_S stCtrl; memset(&stCtrl, 0, sizeof(stCtrl));
-    stCtrl.u32CurFrmNum = frame_num; stCtrl.u8TimeThr = 20; stCtrl.u8DiffMaxThr = 10; stCtrl.u8DiffMinThr = 10; stCtrl.u8FastLearnRate = 4;
+    stCtrl.u32CurFrmNum = frame_num; stCtrl.u8CodeWordNum = 3; stCtrl.u8TimeThr = 50; stCtrl.u8DiffMaxThr = 10; stCtrl.u8DiffMinThr = 10; stCtrl.u8FastLearnRate = 4; stCtrl.u8Alpha = 4;
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_UpdateBgModel(&handle, m_img_u8c1_in1.get(), &stBgModel, m_img_u8c1_in2.get(), m_img_u8c1_out1.get(), &stCtrl, RK_TRUE) != RK_SUCCESS) {
+    if (RK_MPI_IVE_UpdateBgModel(&handle, m_img_u8c1_in1.get(), &stBgModel, m_img_u8c1_out1.get(), m_img_u8c1_out2.get(), &stCtrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_UpdateBgModel failed.");
     }
-    return copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
+    return std::make_tuple(copy_from_ive_buffer(m_img_u8c1_out1.get(), current_img.width, current_img.height),
+                           copy_from_ive_buffer(m_img_u8c1_out2.get(), current_img.width, current_img.height));
 }
 
 std::tuple<ImageBuffer, ImageBuffer> IVE::sad(const ImageBuffer& src1, const ImageBuffer& src2, IVE_SAD_MODE_E mode, uint16_t threshold, uint8_t min_val, uint8_t max_val) {

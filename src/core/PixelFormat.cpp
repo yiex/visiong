@@ -24,11 +24,17 @@ const std::unordered_map<std::string, PIXEL_FORMAT_E>& pixel_format_aliases() {
         {"yuv420sp_vu", RK_FMT_YUV420SP_VU},
         {"gray8", kGray8Format},
         {"gray", kGray8Format},
+        {"s16c1", kS16C1Format},
+        {"u16c1", kU16C1Format},
+        {"u64c1", kU64C1Format},
+        {"hsv888", kHsv888Format},
+        {"s8c1", kS8C1Format},
         {"rgb", RK_FMT_RGB888},
         {"bgr", RK_FMT_BGR888},
         {"yuv", RK_FMT_YUV420SP},
         {"yuv420", RK_FMT_YUV420SP},
         {"nv12", RK_FMT_YUV420SP},
+        {"nv21", RK_FMT_YUV420SP_VU},
     };
     return aliases;
 }
@@ -72,6 +78,16 @@ const char* pixel_format_name(PIXEL_FORMAT_E format) {
             return "YUV420SP";
         case RK_FMT_YUV420SP_VU:
             return "YUV420SP_VU";
+        case kS16C1Format:
+            return "S16C1";
+        case kU16C1Format:
+            return "U16C1";
+        case kU64C1Format:
+            return "U64C1";
+        case kHsv888Format:
+            return "HSV888";
+        case kS8C1Format:
+            return "S8C1";
         default:
             break;
     }

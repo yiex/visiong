@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # Third-Party Notices for VisionG
 
-Last updated: 2026-03-14
+Last updated: 2026-10-28
 
 VisionG project-owned code is distributed under GNU LGPL-3.0-or-later.
 Third-party components keep their original licenses and are not relicensed by LGPL.
@@ -33,6 +33,12 @@ The following files are project-owned compatibility layers, not vendored SDK/sam
 - `src/modules/internal/ive_memory.cpp`
 - `src/c_compat/http-parser.c`
 - `src/python/license_guard.cpp`
+
+IVE interface conventions and background-model parameter defaults are checked
+against the Rockchip examples distributed in
+[LuckfoxTECH/luckfox-pico](https://github.com/LuckfoxTECH/luckfox-pico/tree/main/media/ive/ive/simulator).
+The VisionG wrappers remain project-owned glue. Vendor headers, libraries and
+their original copyright and license terms remain external dependencies.
 
 ## External build-time dependencies not bundled in source releases
 

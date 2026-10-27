@@ -292,15 +292,15 @@ void bind_ive(py::module_& m) {
         .def("dilate", &IVE::dilate, "src"_a, "kernel_size"_a = 3,
              py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
-             "Performs morphological dilation. `src` must be GRAY8. `kernel_size` can be 3 or 5.")
+             "Binary morphological dilation. `src` must be GRAY8 containing only 0 and 255. `kernel_size` can be 3 or 5.")
         .def("erode", &IVE::erode, "src"_a, "kernel_size"_a = 3,
              py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
-             "Performs morphological erosion. `src` must be GRAY8. `kernel_size` can be 3 or 5.")
+             "Binary morphological erosion. `src` must be GRAY8 containing only 0 and 255. `kernel_size` can be 3 or 5.")
         .def("ordered_stat_filter", &IVE::ordered_stat_filter, "src"_a, "mode"_a,
              py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
-             "Performs an ordered statistic filter (Median, Max, Min). `src` must be GRAY8.")
+             "Performs a 3x3 ordered statistic filter (Median, Max, Min). `src` must be GRAY8.")
         .def("add", &IVE::add, "src1"_a, "src2"_a,
              py::return_value_policy::move, py::call_guard<py::gil_scoped_release>(), "Pixel-wise addition. Returns GRAY8; do not pass to cast_16bit_to_8bit.")
         .def("sub", &IVE::sub, "src1"_a, "src2"_a, "mode"_a = IVE_SUB_MODE_ABS,
@@ -360,46 +360,40 @@ void bind_ive(py::module_& m) {
              },
              "src1"_a, "src2"_a, py::return_value_policy::move,
              "Normalized cross-correlation. If sizes differ, set auto_resize=True (default) to resize src2 to src1 size.")
-        .def("csc", &IVE::csc, "src"_a, "mode"_a, py::return_value_policy::move, py::call_guard<py::gil_scoped_release>(), "Performs Color Space Conversion (e.g., YUV to RGB).")
+        .def("csc", &IVE::csc, "src"_a, "mode"_a, "input_full_range"_a = false, py::return_value_policy::move, py::call_guard<py::gil_scoped_release>(), "Hardware color conversion. YUV input defaults to video range; set input_full_range=True for full-range YUV.")
         
         .def("yuv_to_rgb",
              [](IVE& self, const ImageBuffer& src, py::kwargs kwargs) {
+                 const bool input_full_range = kwargs.contains("input_full_range") && kwargs["input_full_range"].cast<bool>();
                  if (kwargs.contains("mode")) {
                      IVE_CSC_MODE_E mode = kwargs["mode"].cast<IVE_CSC_MODE_E>();
-                     if (src.format == RK_FMT_YUV420SP_VU) {
-                         ImageBuffer converted = src.to_format(RK_FMT_YUV420SP);
-                         return self.csc(converted, mode);
-                     }
-                     return self.csc(src, mode);
+                     return self.csc(src, mode, input_full_range);
                  }
                  bool full_range = true;
                  if (kwargs.contains("full_range")) full_range = kwargs["full_range"].cast<bool>();
-                 return self.yuv_to_rgb(src, full_range);
+                 return self.yuv_to_rgb(src, full_range, input_full_range);
              },
              "src"_a, py::return_value_policy::move,
-             "Converts YUV420SP (or YUV420SP_VU) to RGB. Use full_range=True/False, or pass mode=visiong.CscMode.YUV2RGB_*.")
+             "Converts video-range NV12/NV21 to RGB. full_range controls RGB output range; set input_full_range=True for full-range YUV input.")
         .def("yuv_to_hsv",
              [](IVE& self, const ImageBuffer& src, py::kwargs kwargs) {
+                 const bool input_full_range = kwargs.contains("input_full_range") && kwargs["input_full_range"].cast<bool>();
                  if (kwargs.contains("mode")) {
                      IVE_CSC_MODE_E mode = kwargs["mode"].cast<IVE_CSC_MODE_E>();
-                     if (src.format == RK_FMT_YUV420SP_VU) {
-                         ImageBuffer converted = src.to_format(RK_FMT_YUV420SP);
-                         return self.csc(converted, mode);
-                     }
-                     return self.csc(src, mode);
+                     return self.csc(src, mode, input_full_range);
                  }
                  bool full_range = true;
                  if (kwargs.contains("full_range")) full_range = kwargs["full_range"].cast<bool>();
-                 return self.yuv_to_hsv(src, full_range);
+                 return self.yuv_to_hsv(src, full_range, input_full_range);
              },
              "src"_a, py::return_value_policy::move,
-             "Converts YUV420SP (or YUV420SP_VU) to HSV. Use full_range=True/False, or pass mode=visiong.CscMode.YUV2HSV_*.")
+             "Converts video-range NV12/NV21 to HSV888. Set input_full_range=True for full-range YUV input. H, S and V use [0,255].")
         .def("rgb_to_yuv", &IVE::rgb_to_yuv, "src"_a, "full_range"_a = true, py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
-             "Converts RGB/BGR image to YUV420SP.")
+             "Converts RGB/BGR to NV12. full_range selects full-range YUV instead of video-range YUV.")
         .def("rgb_to_hsv", &IVE::rgb_to_hsv, "src"_a, "full_range"_a = true, py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
-             "Converts RGB/BGR image to HSV. H:[0,180], S:[0,255], V:[0,255].")
+             "Converts RGB/BGR to HSV888. H, S and V use [0,255]; NumPy exports preserve HSV channel order.")
 
         .def("dma", &IVE::dma, "src"_a, "mode"_a = IVE_DMA_MODE_DIRECT_COPY, py::return_value_policy::move,
              py::call_guard<py::gil_scoped_release>(),
@@ -421,14 +415,16 @@ void bind_ive(py::module_& m) {
              "Normalized gradient. Returns (horizontal_grad, vertical_grad); both S16C1 - use cast_16bit_to_8bit for display.")
         .def("lk_optical_flow", &IVE::lk_optical_flow, "prev_img"_a, "next_img"_a, "points"_a,
              py::call_guard<py::gil_scoped_release>(),
-             "Performs Lucas-Kanade optical flow. points: list of (x,y). Returns list of MotionVector; mv_x/mv_y are S9.7 (divide by 128 for pixels). Up to ~500 points.")
+             "Performs pyramidal Lucas-Kanade optical flow. points: integer (x,y) coordinates inside the image. "
+             "Returns MotionVector values with status=0 for success and -1 for failure; mv_x/mv_y are S9.7 "
+             "(divide by 128 for pixel displacement). Up to 500 points; image dimensions must be at least 64x64.")
         .def("st_corner", &IVE::st_corner, "src"_a, "max_corners"_a = 200, "min_dist"_a = 10, "quality_level"_a = 25,
              py::call_guard<py::gil_scoped_release>(),
              "Performs Shi-Tomasi corner detection. Returns a list of (x, y) corner tuples.")
-        .def("match_bg_model", &IVE::match_bg_model, "current_img"_a, "bg_model"_a, "frame_num"_a, py::return_value_policy::move,
-             "Matches the current image against a background model. Returns a foreground flag image.")
-        .def("update_bg_model", &IVE::update_bg_model, "current_img"_a, "fg_flag"_a, "bg_model"_a, "frame_num"_a, py::return_value_policy::move,
-             "Updates the background model. Returns the new background image.")
+        .def("match_bg_model", &IVE::match_bg_model, "current_img"_a, "bg_model"_a, "frame_num"_a,
+             "Trains the background codebook using a GRAY8 frame. Updates bg_model in place and returns None.")
+        .def("update_bg_model", &IVE::update_bg_model, "current_img"_a, "bg_model"_a, "frame_num"_a, py::return_value_policy::move,
+             "Updates the background codebook and returns (foreground_status, background_image), both GRAY8.")
         .def("sad", &IVE::sad, "src1"_a, "src2"_a, "mode"_a, "threshold"_a, "min_val"_a = 0, "max_val"_a = 255,
              py::call_guard<py::gil_scoped_release>(),
              "Sum of Absolute Differences. Returns (sad_image U16C1, threshold_image U8C1); cast sad_image for 8-bit display.")

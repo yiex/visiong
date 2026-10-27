@@ -2,6 +2,7 @@
 #include "internal/bindings_common.h"
 #include "visiong/core/BufferStateMachine.h"
 #include "core/internal/rga_utils.h"
+#include "visiong/common/pixel_format.h"
 
 std::string get_image_buffer_compact_bytes(const ImageBuffer& img) {
     if (!img.is_valid()) {
@@ -13,6 +14,13 @@ std::string get_image_buffer_compact_bytes(const ImageBuffer& img) {
     std::string user_data(compact_size, '\0');
 
     visiong::bufstate::prepare_cpu_read(img);
+    if (visiong::is_yuv420sp_format(img.format)) {
+        copy_data_from_stride(user_data.data(), src_ptr, img.width, img.height, img.w_stride);
+        copy_data_from_stride(user_data.data() + static_cast<size_t>(img.width) * img.height,
+                static_cast<const unsigned char*>(src_ptr) + static_cast<size_t>(img.w_stride) * img.h_stride,
+                img.width, img.height / 2, img.w_stride);
+        return user_data;
+    }
     copy_data_from_stride(user_data.data(), src_ptr,
                           img.width * bpp / 8, img.height,
                           img.w_stride * bpp / 8);
@@ -33,8 +41,23 @@ py::array make_image_buffer_numpy_view(ImageBuffer& img) {
     const ImageBuffer* storage = &img;
     std::vector<ssize_t> shape;
     std::vector<ssize_t> strides;
+    py::dtype dtype = py::dtype::of<unsigned char>();
 
-    if (img.format == kGray8) {
+    if (img.format == visiong::kS8C1Format || img.format == visiong::kS16C1Format || img.format == visiong::kU16C1Format ||
+        img.format == visiong::kU64C1Format) {
+        visiong::bufstate::prepare_cpu_read(img);
+        const ssize_t itemsize = get_bpp_for_format(img.format) / 8;
+        shape = {img.height, img.width};
+        strides = {img.w_stride * itemsize, itemsize};
+        if (img.format == visiong::kS8C1Format) dtype = py::dtype::of<int8_t>();
+        else if (img.format == visiong::kS16C1Format) dtype = py::dtype::of<int16_t>();
+        else if (img.format == visiong::kU16C1Format) dtype = py::dtype::of<uint16_t>();
+        else dtype = py::dtype::of<uint64_t>();
+    } else if (img.format == visiong::kHsv888Format) {
+        visiong::bufstate::prepare_cpu_read(img);
+        shape = {img.height, img.width, 3};
+        strides = {img.w_stride * 3, 3, 1};
+    } else if (img.format == kGray8) {
         const ImageBuffer& gray_img = img.get_gray_version();
         visiong::bufstate::prepare_cpu_read(gray_img);
         storage = &gray_img;
@@ -49,7 +72,7 @@ py::array make_image_buffer_numpy_view(ImageBuffer& img) {
     }
 
     py::object base = py::cast(&img, py::return_value_policy::reference);
-    py::array arr(py::dtype::of<unsigned char>(),
+    py::array arr(dtype,
                   shape,
                   strides,
                   static_cast<const unsigned char*>(storage->get_data()),

@@ -64,9 +64,14 @@ int get_bpp_for_format(int format) {
     switch (format) {
         case RK_FMT_RGB565:
         case RK_FMT_BGR565:
+        case static_cast<int>(visiong::kS16C1Format):
+        case static_cast<int>(visiong::kU16C1Format):
             return 16;
+        case static_cast<int>(visiong::kU64C1Format):
+            return 64;
         case RK_FMT_RGB888:
         case RK_FMT_BGR888:
+        case static_cast<int>(visiong::kHsv888Format):
             return 24;
         case RK_FMT_RGBA8888:
         case RK_FMT_BGRA8888:
@@ -75,6 +80,7 @@ int get_bpp_for_format(int format) {
         case RK_FMT_YUV420SP_VU:
             return 12;
         case static_cast<int>(visiong::kGray8Format):
+        case static_cast<int>(visiong::kS8C1Format):
             return 8;
         default:
             throw std::invalid_argument("Unsupported pixel format in get_bpp_for_format: " + std::to_string(format));

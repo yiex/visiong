@@ -74,6 +74,21 @@ void bind_core_types(py::module_& m) {
 
 namespace {
 
+template <typename T>
+ImageBuffer typed_image_from_numpy(py::array array, PIXEL_FORMAT_E format, bool copy) {
+    if (!copy) throw std::invalid_argument("Typed grayscale NumPy imports require copy=True.");
+    if (!array.dtype().is(py::dtype::of<T>())) {
+        throw std::invalid_argument("NumPy dtype must match the requested grayscale format.");
+    }
+    auto contiguous = py::array_t<T, py::array::c_style>::ensure(array);
+    if (!contiguous || contiguous.ndim() != 2) {
+        throw std::invalid_argument("Typed grayscale imports require a two-dimensional array.");
+    }
+    const auto* begin = reinterpret_cast<const unsigned char*>(contiguous.data());
+    return ImageBuffer(contiguous.shape(1), contiguous.shape(0), format,
+            std::vector<unsigned char>(begin, begin + contiguous.nbytes()));
+}
+
 py::array image_to_numpy_array(ImageBuffer& img, bool copy) {
     py::array arr = make_image_buffer_numpy_view(img);
     if (copy) {
@@ -83,6 +98,10 @@ py::array image_to_numpy_array(ImageBuffer& img, bool copy) {
 }
 
 ImageBuffer image_buffer_from_numpy_impl(py::array arr, const std::string& fmt, bool copy, bool strict_zero_copy) {
+    if (visiong::to_lower_copy(fmt) == "s8c1") return typed_image_from_numpy<int8_t>(arr, visiong::kS8C1Format, copy);
+    if (visiong::to_lower_copy(fmt) == "s16c1") return typed_image_from_numpy<int16_t>(arr, visiong::kS16C1Format, copy);
+    if (visiong::to_lower_copy(fmt) == "u16c1") return typed_image_from_numpy<uint16_t>(arr, visiong::kU16C1Format, copy);
+    if (visiong::to_lower_copy(fmt) == "u64c1") return typed_image_from_numpy<uint64_t>(arr, visiong::kU64C1Format, copy);
     py::array prepared;
     if (copy) {
         auto tmp = py::array_t<unsigned char, py::array::c_style | py::array::forcecast>::ensure(arr);
@@ -130,7 +149,7 @@ ImageBuffer image_buffer_from_numpy_impl(py::array arr, const std::string& fmt, 
     } else {
         format = visiong::parse_pixel_format(fmt);
         int expected_ch = 1;
-        if (format == RK_FMT_BGR888 || format == RK_FMT_RGB888) expected_ch = 3;
+        if (format == RK_FMT_BGR888 || format == RK_FMT_RGB888 || format == visiong::kHsv888Format) expected_ch = 3;
         else if (format == RK_FMT_BGRA8888 || format == RK_FMT_RGBA8888) expected_ch = 4;
         else if (format == kGray8) expected_ch = 1;
         if (expected_ch != channels) {
@@ -202,6 +221,14 @@ void bind_image_buffer(py::module_& m) {
             ssize_t ndim;
             std::vector<ssize_t> shape, strides;
 
+            if (img.format == visiong::kS8C1Format || img.format == visiong::kS16C1Format || img.format == visiong::kU16C1Format || img.format == visiong::kU64C1Format) {
+                const std::string descriptor = img.format == visiong::kS8C1Format ? py::format_descriptor<int8_t>::format() :
+                        (img.format == visiong::kS16C1Format ? py::format_descriptor<int16_t>::format() :
+                        (img.format == visiong::kU16C1Format ? py::format_descriptor<uint16_t>::format() : py::format_descriptor<uint64_t>::format()));
+                return py::buffer_info(img.get_data(), itemsize, descriptor, 2,
+                        {img.height, img.width}, {img.w_stride * itemsize, itemsize}, true);
+            }
+
             switch (static_cast<int>(img.format)) {
                 case static_cast<int>(kGray8):
                     format_py = py::format_descriptor<unsigned char>::format();
@@ -209,7 +236,7 @@ void bind_image_buffer(py::module_& m) {
                     shape = { (ssize_t)img.height, (ssize_t)img.width };
                     strides = { (ssize_t)(img.w_stride * itemsize), (ssize_t)itemsize };
                     break;
-                case RK_FMT_BGR888: case RK_FMT_RGB888:
+                case RK_FMT_BGR888: case RK_FMT_RGB888: case visiong::kHsv888Format:
                     format_py = py::format_descriptor<unsigned char>::format();
                     ndim = 3;
                     shape = { (ssize_t)img.height, (ssize_t)img.width, 3 };
@@ -261,10 +288,14 @@ void bind_image_buffer(py::module_& m) {
             }
             PIXEL_FORMAT_E pixel_format = visiong::parse_pixel_format(fmt);
             const int bpp = get_bpp_for_format(pixel_format);
-            if (bpp == 0 || bpp % 8 != 0) {
+            const bool yuv = visiong::is_yuv420sp_format(pixel_format);
+            if ((bpp == 0 || bpp % 8 != 0) && !yuv) {
                 throw std::runtime_error("from_bytes: unsupported pixel format.");
             }
-            const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(bpp / 8);
+            if (yuv && ((width & 1) || (height & 1))) {
+                throw std::runtime_error("from_bytes: YUV420 requires even width and height.");
+            }
+            const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height) * bpp / 8;
             const size_t available = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
             if (width <= 0 || height <= 0 || available != expected) {
                 throw std::runtime_error("from_bytes: buffer size must exactly match width * height * bytes_per_pixel.");
@@ -285,11 +316,6 @@ void bind_image_buffer(py::module_& m) {
         .def_readonly("width", &ImageBuffer::width)
         .def_readonly("height", &ImageBuffer::height)
         .def_property_readonly("format", [](const ImageBuffer& buf){
-#if VISIONG_WITH_IVE
-            if (buf.format == static_cast<PIXEL_FORMAT_E>(IVE_IMAGE_TYPE_S16C1)) {
-                return std::string("S16C1");
-            }
-#endif
             return std::string(visiong::pixel_format_name(buf.format));
         })
         .def("is_valid", &ImageBuffer::is_valid,
