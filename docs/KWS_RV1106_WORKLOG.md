@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # KWS RV1106 Worklog
 
+Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; paths below are relative to that workspace.
+
 ## Goal
 
 Port a mature keyword spotting pipeline to `visiong`, validate it on the real `RV1106` board, and keep the final implementation both fast and safe.
@@ -9,11 +11,11 @@ Port a mature keyword spotting pipeline to `visiong`, validate it on the real `R
 
 Repository worktree:
 
-- local `visiong` checkout on `D:`
+- local `visiong` checkout (`VISIONG_ROOT`)
 
 Large data and artifacts:
 
-- `D:\visiong-kws-demo`
+- `${KWS_WORKSPACE}`
 
 Repository:
 
@@ -29,8 +31,8 @@ Repository:
 
 ## Major Completed Steps
 
-- downloaded Speech Commands to `D:\visiong-kws-demo\data`
-- prepared features, calibration tensors, and a board eval bundle under `D:\visiong-kws-demo\prepared_kws`
+- downloaded Speech Commands to `${KWS_WORKSPACE}/data`
+- prepared features, calibration tensors, and a board eval bundle under `${KWS_WORKSPACE}/prepared_kws`
 - trained DS-CNN variants and selected the 64-channel model
 - converted the winning ONNX model to RKNN for `rv1106`
 - validated the RKNN model on the real board
@@ -83,7 +85,7 @@ After fixing that:
 - run id: `23943474500`
 - artifact id: `6258357084`
 - local artifact root:
-  - `D:\visiong-kws-demo\github_action_build_audio_fix`
+  - `${KWS_WORKSPACE}/github_action_build_audio_fix`
 - board override directory:
   - `/root/visiong_action_pkg_fix`
 
@@ -102,7 +104,7 @@ Board results from that artifact:
 - run id: `23951414494`
 - artifact id: `6261386543`
 - local artifact root:
-  - `D:\visiong-kws-demo\github_action_build_audio_neon`
+  - `${KWS_WORKSPACE}/github_action_build_audio_neon`
 - board override directory:
   - `/root/visiong_action_pkg_neon`
 
@@ -124,14 +126,14 @@ This was intentionally not kept.
 - run id: `23952785354`
 - artifact id: `6261923551`
 - local artifact root:
-  - `D:\visiong-kws-demo\github_action_build_kws_wrapper`
+  - `${KWS_WORKSPACE}/github_action_build_kws_wrapper`
 - board override directory:
   - `/root/visiong_action_pkg_kws`
 
 Board validation result:
 
 - summary:
-  - `D:\visiong-kws-demo\kws_wrapper_eval.json`
+  - `${KWS_WORKSPACE}/kws_wrapper_eval.json`
 - evaluation samples: `120`
 - accuracy: `0.9083`
 - post-warmup wall mean: `11.012 ms`
@@ -141,7 +143,7 @@ Board validation result:
 Single-sample smoke result:
 
 - summary:
-  - `D:\visiong-kws-demo\kws_wrapper_smoke.json`
+  - `${KWS_WORKSPACE}/kws_wrapper_smoke.json`
 - returned type: `KWSResult`
 - predicted label: `yes`
 - confidence: about `0.9997`

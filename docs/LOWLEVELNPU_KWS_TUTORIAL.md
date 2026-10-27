@@ -59,13 +59,20 @@ So for normal Python use, this is now the recommended API.
 
 ## Repository and Data Layout
 
+Set the following variables in the Linux shell before running the examples:
+
+```sh
+export VISIONG_ROOT="$HOME/visiong"
+export KWS_WORKSPACE="$HOME/visiong-kws-demo"
+```
+
 Repository worktree:
 
-- local `visiong` checkout on `D:`
+- local `visiong` checkout (`VISIONG_ROOT`)
 
 Large data and artifacts:
 
-- `D:\visiong-kws-demo`
+- `${KWS_WORKSPACE}`
 
 Main scripts:
 
@@ -110,16 +117,14 @@ Why this is the recommended API:
 
 `LowLevelNPU` is still useful for teaching, debugging, and unusual custom models, but `KWS` is the better default for keyword spotting.
 
-## Step 1: Download Speech Commands to D:
+## Step 1: Download Speech Commands
 
 WSL2 command:
 
 ```bash
-export http_proxy=http://172.18.80.1:7890
-export https_proxy=http://172.18.80.1:7890
 
-mkdir -p /mnt/d/visiong-kws-demo/data
-cd /mnt/d/visiong-kws-demo/data
+mkdir -p ${KWS_WORKSPACE}/data
+cd ${KWS_WORKSPACE}/data
 wget -c -O speech_commands_v0.02.tar.gz \
   https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz
 mkdir -p speech_commands_v0.02
@@ -128,18 +133,17 @@ tar -xzf speech_commands_v0.02.tar.gz -C speech_commands_v0.02
 
 Why `storage.googleapis.com` instead of `download.tensorflow.org`:
 
-- Under the current proxy setup, the latter produced a hostname mismatch certificate issue.
-- The Google Storage URL is the same payload and worked correctly through Clash.
+The Google Storage URL hosts the Speech Commands dataset archive.
 
 ## Step 2: Prepare Features, Calibration Tensors, and a Board Eval Bundle
 
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong/scripts/lowlevelnpu_kws
+cd ${VISIONG_ROOT}/scripts/lowlevelnpu_kws
 python3 prepare_speech_commands.py \
-  --raw-root /mnt/d/visiong-kws-demo/data/speech_commands_v0.02 \
-  --output-root /mnt/d/visiong-kws-demo/prepared_kws \
+  --raw-root ${KWS_WORKSPACE}/data/speech_commands_v0.02 \
+  --output-root ${KWS_WORKSPACE}/prepared_kws \
   --board-per-label 10 \
   --calibration-count 128 \
   --overwrite
@@ -173,11 +177,11 @@ Prepared split counts from the actual run:
 
 Relevant outputs:
 
-- `D:\visiong-kws-demo\prepared_kws\features\train.npz`
-- `D:\visiong-kws-demo\prepared_kws\features\val.npz`
-- `D:\visiong-kws-demo\prepared_kws\features\test.npz`
-- `D:\visiong-kws-demo\prepared_kws\calibration\quant_dataset.txt`
-- `D:\visiong-kws-demo\prepared_kws\board_bundle`
+- `${KWS_WORKSPACE}/prepared_kws/features/train.npz`
+- `${KWS_WORKSPACE}/prepared_kws/features/val.npz`
+- `${KWS_WORKSPACE}/prepared_kws/features/test.npz`
+- `${KWS_WORKSPACE}/prepared_kws/calibration/quant_dataset.txt`
+- `${KWS_WORKSPACE}/prepared_kws/board_bundle`
 
 ## Step 3: Train the DS-CNN Model
 
@@ -191,10 +195,10 @@ The `64`-channel model won clearly, so it became the final one.
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong/scripts/lowlevelnpu_kws
+cd ${VISIONG_ROOT}/scripts/lowlevelnpu_kws
 python3 train_kws_ds_cnn.py \
-  --prepared-root /mnt/d/visiong-kws-demo/prepared_kws \
-  --output-root /mnt/d/visiong-kws-demo/train_kws_c64 \
+  --prepared-root ${KWS_WORKSPACE}/prepared_kws \
+  --output-root ${KWS_WORKSPACE}/train_kws_c64 \
   --epochs 22 \
   --batch-size 256 \
   --channels 64 \
@@ -210,20 +214,20 @@ Actual result from the winning run:
 
 Artifacts:
 
-- `D:\visiong-kws-demo\train_kws_c64\kws_ds_cnn.pt`
-- `D:\visiong-kws-demo\train_kws_c64\kws_ds_cnn.onnx`
-- `D:\visiong-kws-demo\train_kws_c64\training_summary.json`
+- `${KWS_WORKSPACE}/train_kws_c64/kws_ds_cnn.pt`
+- `${KWS_WORKSPACE}/train_kws_c64/kws_ds_cnn.onnx`
+- `${KWS_WORKSPACE}/train_kws_c64/training_summary.json`
 
 ## Step 4: Convert ONNX to RKNN
 
 WSL2 command:
 
 ```bash
-cd /mnt/d/visiong/scripts/lowlevelnpu_kws
+cd ${VISIONG_ROOT}/scripts/lowlevelnpu_kws
 python3 convert_kws_ds_cnn_to_rknn.py \
-  --onnx-model /mnt/d/visiong-kws-demo/train_kws_c64/kws_ds_cnn.onnx \
-  --dataset /mnt/d/visiong-kws-demo/prepared_kws/calibration/quant_dataset.txt \
-  --output-rknn /mnt/d/visiong-kws-demo/rknn_kws_c64/kws_ds_cnn.rknn
+  --onnx-model ${KWS_WORKSPACE}/train_kws_c64/kws_ds_cnn.onnx \
+  --dataset ${KWS_WORKSPACE}/prepared_kws/calibration/quant_dataset.txt \
+  --output-rknn ${KWS_WORKSPACE}/rknn_kws_c64/kws_ds_cnn.rknn
 ```
 
 RKNN build result:
@@ -235,7 +239,7 @@ RKNN build result:
 
 Artifact:
 
-- `D:\visiong-kws-demo\rknn_kws_c64\kws_ds_cnn.rknn`
+- `${KWS_WORKSPACE}/rknn_kws_c64/kws_ds_cnn.rknn`
 
 ## Step 5: Deploy and Run on the Board
 
@@ -317,8 +321,7 @@ Validation setup:
 
 - workflow: `build-binary-artifact`
 - workflow run: `23943474500`
-- branch: `codex/kws-rv1106`
-- downloaded artifact root: `D:\visiong-kws-demo\github_action_build_audio_fix`
+- downloaded artifact root: `${KWS_WORKSPACE}/github_action_build_audio_fix`
 - deployed board override path: `/root/visiong_action_pkg_fix`
 - board execution path:
   - `PYTHONPATH=/root/visiong_action_pkg_fix:/root/visiong_kws_demo_c64/scripts`
@@ -462,8 +465,8 @@ Prepare:
 
 ```bash
 python3 prepare_speech_commands.py \
-  --raw-root /mnt/d/visiong-kws-demo/data/speech_commands_v0.02 \
-  --output-root /mnt/d/visiong-kws-demo/prepared_kws \
+  --raw-root ${KWS_WORKSPACE}/data/speech_commands_v0.02 \
+  --output-root ${KWS_WORKSPACE}/prepared_kws \
   --board-per-label 10 \
   --calibration-count 128 \
   --overwrite
@@ -473,8 +476,8 @@ Train:
 
 ```bash
 python3 train_kws_ds_cnn.py \
-  --prepared-root /mnt/d/visiong-kws-demo/prepared_kws \
-  --output-root /mnt/d/visiong-kws-demo/train_kws_c64 \
+  --prepared-root ${KWS_WORKSPACE}/prepared_kws \
+  --output-root ${KWS_WORKSPACE}/train_kws_c64 \
   --epochs 22 \
   --batch-size 256 \
   --channels 64 \
@@ -485,9 +488,9 @@ Convert:
 
 ```bash
 python3 convert_kws_ds_cnn_to_rknn.py \
-  --onnx-model /mnt/d/visiong-kws-demo/train_kws_c64/kws_ds_cnn.onnx \
-  --dataset /mnt/d/visiong-kws-demo/prepared_kws/calibration/quant_dataset.txt \
-  --output-rknn /mnt/d/visiong-kws-demo/rknn_kws_c64/kws_ds_cnn.rknn
+  --onnx-model ${KWS_WORKSPACE}/train_kws_c64/kws_ds_cnn.onnx \
+  --dataset ${KWS_WORKSPACE}/prepared_kws/calibration/quant_dataset.txt \
+  --output-rknn ${KWS_WORKSPACE}/rknn_kws_c64/kws_ds_cnn.rknn
 ```
 
 Board eval on older runtime:

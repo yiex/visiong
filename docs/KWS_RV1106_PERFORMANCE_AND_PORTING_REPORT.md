@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # RV1106 KWS Performance And Porting Report
 
+Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; paths below are relative to that workspace.
+
 ## Executive Summary
 
 This migration is now in a good production-ready state for a compact keyword spotting demo on `RV1106`.
@@ -23,34 +25,33 @@ What is now true:
 
 Repository worktree:
 
-- local `visiong` checkout on `D:`
+- local `visiong` checkout (`VISIONG_ROOT`)
 
 Artifacts and datasets:
 
-- `D:\visiong-kws-demo`
+- `${KWS_WORKSPACE}`
 
 Fork branch used for cloud builds:
 
 - `yiex/visiong`
-- branch `codex/kws-rv1106`
 
 Cloud-built artifact that validated the native frontend fix:
 
 - workflow run: `23943474500`
 - artifact id: `6258357084`
-- local download root: `D:\visiong-kws-demo\github_action_build_audio_fix`
+- local download root: `${KWS_WORKSPACE}/github_action_build_audio_fix`
 - board override path: `/root/visiong_action_pkg_fix`
 
 Board-side result files:
 
 - Python frontend summary:
-  - `D:\visiong-kws-demo\board_summary_action_python_frontend_fix.json`
+  - `${KWS_WORKSPACE}/board_summary_action_python_frontend_fix.json`
 - Native frontend summary:
-  - `D:\visiong-kws-demo\board_summary_action_native_frontend_fix.json`
+  - `${KWS_WORKSPACE}/board_summary_action_native_frontend_fix.json`
 
 ## Accuracy
 
-Training-side result from `D:\visiong-kws-demo\train_kws_c64\training_summary.json`:
+Training-side result from `${KWS_WORKSPACE}/train_kws_c64/training_summary.json`:
 
 - best validation accuracy: `0.9244`
 - test accuracy: `0.9212`
@@ -83,7 +84,7 @@ Both measurements below were taken on the real board with:
 
 Source:
 
-- `D:\visiong-kws-demo\board_summary_action_python_frontend_fix.json`
+- `${KWS_WORKSPACE}/board_summary_action_python_frontend_fix.json`
 
 Post-warmup metrics:
 
@@ -100,7 +101,7 @@ Post-warmup metrics:
 
 Source:
 
-- `D:\visiong-kws-demo\board_summary_action_native_frontend_fix.json`
+- `${KWS_WORKSPACE}/board_summary_action_native_frontend_fix.json`
 
 Post-warmup metrics:
 
@@ -142,13 +143,13 @@ Validated cloud-built artifact:
 
 - workflow run: `23952785354`
 - artifact id: `6261923551`
-- local artifact root: `D:\visiong-kws-demo\github_action_build_kws_wrapper`
+- local artifact root: `${KWS_WORKSPACE}/github_action_build_kws_wrapper`
 - board override path: `/root/visiong_action_pkg_kws`
 
 Board result from the dedicated wrapper:
 
 - source summary:
-  - `D:\visiong-kws-demo\kws_wrapper_eval.json`
+  - `${KWS_WORKSPACE}/kws_wrapper_eval.json`
 - evaluation samples: `120`
 - accuracy: `0.9083`
 - post-warmup wall mean: `11.012 ms`
@@ -374,8 +375,8 @@ Main implementation:
 
 Board-side measured summaries:
 
-- `D:\visiong-kws-demo\board_summary_action_python_frontend_fix.json`
-- `D:\visiong-kws-demo\board_summary_action_native_frontend_fix.json`
+- `${KWS_WORKSPACE}/board_summary_action_python_frontend_fix.json`
+- `${KWS_WORKSPACE}/board_summary_action_native_frontend_fix.json`
 
 Migration notes:
 
