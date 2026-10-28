@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -84,6 +85,12 @@ jobs:
           ./test_yolo26_decode
           rm test_yolo26_decode
 
+      - name: Validate IVE numeric references
+        run: |
+          python3 ./scripts/check_ive_modes.py --self-test
+          python3 ./scripts/check_ive_extended.py --self-test
+          python3 ./scripts/check_ive_csc.py --self-check --output /tmp/ive_csc_reference.json
+
       - name: Install host packages
         run: |
           sudo apt-get update
@@ -152,16 +159,16 @@ jobs:
           cat > "${GITHUB_WORKSPACE}/dist/release-notes-${RELEASE_LABEL}.md" <<EOF
           # VisionG ${RELEASE_LABEL}
 
+          ## Changes
+          - Complete IVE image-processing controls, color layouts and background models.
+          - Improve sparse optical-flow validation and NEON processing performance.
+          - Fix stride, boundary and cache handling; add validation scripts and usage notes.
+
           ## Assets
           - \`visiong_cpp.zip\`
           - \`visiong_python.zip\`
 
-          ## Build notes
-          - Build toggles: IVE=${VISIONG_ENABLE_IVE}, NPU=${VISIONG_ENABLE_NPU}, GUI=${VISIONG_ENABLE_GUI}.
-          - Both release archives include \`visiong_hw.ko\` for the RV1103/RV1106 low-level hardware helper.
-          - \`visiong_cpp.zip\` only ships VisionG public headers; external SDK headers are intentionally excluded.
-          - Staged Rockchip SDK, RKNN, librga, and IVE runtime libraries are not published as release assets.
-          - The target board must still provide the required Rockchip runtime libraries.
+          Both packages include \`visiong_hw.ko\`. Required Rockchip runtime libraries remain supplied by the board.
           EOF
 
       - name: Upload workflow artifacts

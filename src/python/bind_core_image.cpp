@@ -148,6 +148,9 @@ ImageBuffer image_buffer_from_numpy_impl(py::array arr, const std::string& fmt, 
         }
     } else {
         format = visiong::parse_pixel_format(fmt);
+        if (visiong::is_yuv420sp_format(format)) {
+            throw std::runtime_error("from_numpy: use from_bytes with explicit width and height for YUV420SP planes.");
+        }
         int expected_ch = 1;
         if (format == RK_FMT_BGR888 || format == RK_FMT_RGB888 || format == visiong::kHsv888Format) expected_ch = 3;
         else if (format == RK_FMT_BGRA8888 || format == RK_FMT_RGBA8888) expected_ch = 4;

@@ -219,6 +219,9 @@ void fill_morph_mask(RK_U8 (&mask)[kFiveByFiveMaskArea], int kernel_size) {
 
 CscModeTraits get_csc_mode_traits(IVE_CSC_MODE_E mode) {
     const int mode_val = static_cast<int>(mode);
+    if (mode_val < 0 || (mode_val & 15) > 3 || (mode_val & ~0x33) != 0) {
+        throw std::invalid_argument("Invalid IVE CSC mode.");
+    }
     CscModeTraits traits;
     traits.yuv_input = (mode_val <= 0x1F); // YUV2RGB / YUV2HSV
     traits.yuv_output = (mode_val >= 0x20 && mode_val <= 0x23); // RGB2YUV
@@ -277,6 +280,7 @@ ImageBuffer convert_from_rgb_pack3(
 static PIXEL_FORMAT_E ive_type_to_visiong_format(IVE_IMAGE_TYPE_E type) {
     switch (type) {
         case IVE_IMAGE_TYPE_U8C1: return visiong::kGray8Format;
+        case IVE_IMAGE_TYPE_S8C1: return visiong::kS8C1Format;
         case IVE_IMAGE_TYPE_S16C1: return visiong::kS16C1Format;
         case IVE_IMAGE_TYPE_U16C1: return visiong::kU16C1Format;
         case IVE_IMAGE_TYPE_U64C1: return visiong::kU64C1Format;
@@ -294,14 +298,15 @@ static int get_bytes_per_pixel_for_ive_type(IVE_IMAGE_TYPE_E type) {
 }
 
 // --- IVEModel Implementation --- / --- IVEModel 实现 ---
-IVEModel::IVEModel(int width, int height, int model_size) {
+IVEModel::IVEModel(int width, int height, int model_size) : m_width(width), m_height(height) {
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
         throw std::invalid_argument("IVE model dimensions must be in [1,4096].");
     }
-    if (model_size <= 0) {
+    if (model_size < 0) throw std::invalid_argument("IVE model_size cannot be negative.");
+    if (model_size == 0) {
         const RK_U64 pixels = static_cast<RK_U64>(calc_stride(width)) * height;
         const RK_U64 background_pixels = static_cast<RK_U64>(calc_stride(width)) * calc_stride(height);
-        const RK_U64 bytes = std::max(pixels * 3 * 4 + sizeof(IVE_GMM_NUM_INFO_S), background_pixels * sizeof(IVE_BG_MODEL_PIX_S));
+        const RK_U64 bytes = std::max(pixels * 5 * 4 + sizeof(IVE_GMM_NUM_INFO_S), background_pixels * sizeof(IVE_BG_MODEL_PIX_S));
         if (bytes > std::numeric_limits<RK_U32>::max()) throw std::invalid_argument("IVE model is too large.");
         mem_info.u32Size = static_cast<RK_U32>(bytes);
     } else {
@@ -310,11 +315,64 @@ IVEModel::IVEModel(int width, int height, int model_size) {
     if (create_mem_info(&mem_info, mem_info.u32Size) != RK_SUCCESS) {
         throw std::runtime_error("Failed to allocate memory for IVEModel.");
     }
-    mmz_flush_start(reinterpret_cast<void*>(mem_info.u64VirAddr));
-    memset((void*)mem_info.u64VirAddr, 0, mem_info.u32Size);
-    mmz_flush_end(reinterpret_cast<void*>(mem_info.u64VirAddr));
+    try {
+        clear_locked();
+    } catch (...) {
+        mmz_free(reinterpret_cast<void*>(mem_info.u64VirAddr));
+        mem_info = {};
+        throw;
+    }
+}
+
+void IVEModel::validate_dimensions(int width, int height) const {
+    if (width != m_width || height != m_height) {
+        throw std::invalid_argument("IVE model dimensions must match the source image.");
+    }
+}
+
+void IVEModel::clear_locked() {
+    m_algorithm = Algorithm::Uninitialized;
+    m_gmm_models = 0;
+    void* address = reinterpret_cast<void*>(mem_info.u64VirAddr);
+    if (mmz_flush_start(address) != RK_SUCCESS) throw std::runtime_error("Failed to begin IVE model reset.");
+    std::memset(address, 0, mem_info.u32Size);
+    if (mmz_flush_end(address) != RK_SUCCESS) throw std::runtime_error("Failed to end IVE model reset.");
+    if (m_gmm_matched.au64VirAddr[0]) {
+        address = reinterpret_cast<void*>(m_gmm_matched.au64VirAddr[0]);
+        if (mmz_flush_start(address) != RK_SUCCESS) throw std::runtime_error("Failed to begin GMM match reset.");
+        std::memset(address, 0, static_cast<size_t>(m_gmm_matched.au32Stride[0]) * m_height);
+        if (mmz_flush_end(address) != RK_SUCCESS) throw std::runtime_error("Failed to end GMM match reset.");
+    }
+    if (m_gmm_output.u64VirAddr) {
+        address = reinterpret_cast<void*>(m_gmm_output.u64VirAddr);
+        if (mmz_flush_start(address) != RK_SUCCESS) throw std::runtime_error("Failed to begin GMM output reset.");
+        std::memset(address, 0, m_gmm_output.u32Size);
+        if (mmz_flush_end(address) != RK_SUCCESS) throw std::runtime_error("Failed to end GMM output reset.");
+    }
+}
+
+void IVEModel::prepare_gmm_locked(bool separate_output) {
+    if (!m_gmm_matched.au64VirAddr[0]) {
+        if (create_image(&m_gmm_matched, IVE_IMAGE_TYPE_U8C1, m_width, m_height) != RK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate GMM match state.");
+        }
+        // GMM matched records use packed rows; the runtime has no separate match-stride register.
+        // GMM 匹配记录采用紧凑行布局，运行库没有独立的匹配图步长寄存器。
+        m_gmm_matched.au32Stride[0] = m_width;
+    }
+    if (separate_output && !m_gmm_output.u64VirAddr &&
+        create_mem_info(&m_gmm_output, mem_info.u32Size) != RK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate GMM output state.");
+    }
+}
+
+void IVEModel::reset() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    clear_locked();
 }
 IVEModel::~IVEModel() {
+    if (m_gmm_matched.au64VirAddr[0]) mmz_free(reinterpret_cast<void*>(m_gmm_matched.au64VirAddr[0]));
+    if (m_gmm_output.u64VirAddr) mmz_free(reinterpret_cast<void*>(m_gmm_output.u64VirAddr));
     if (mem_info.u64VirAddr != 0) {
         mmz_free((void*)mem_info.u64VirAddr);
     }
@@ -400,6 +458,9 @@ void IVE::create_and_check_buffer(std::unique_ptr<IVE_IMAGE_S>& img, IVE_IMAGE_T
 
 // Called with m_mutex held by the public API; no nested locking here. / 调用到这里时 public API 已持有 m_mutex，因此此处不再做嵌套加锁。
 void IVE::ensure_buffers(int width, int height) {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        throw std::invalid_argument("IVE image dimensions must be in [1,4096].");
+    }
     if (m_width == width && m_height == height) {
         return;
     }
@@ -488,8 +549,14 @@ void IVE::copy_to_ive_buffer(const ImageBuffer& src, IVE_IMAGE_S* dst) {
         throw std::runtime_error("Image dimension mismatch in copy_to_ive_buffer.");
     }
     
-    visiong::bufstate::prepare_cpu_read(src);
     int item_size = get_bytes_per_pixel_for_ive_type(dst->enType);
+    if (src.w_stride < src.width || src.h_stride < src.height ||
+        static_cast<uint64_t>(src.w_stride) * item_size > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        static_cast<uint64_t>(src.get_size()) <
+            (static_cast<uint64_t>(src.height - 1) * src.w_stride + src.width) * item_size) {
+        throw std::invalid_argument("IVE input storage is smaller than its dimensions and stride.");
+    }
+    visiong::bufstate::prepare_cpu_read(src);
     if (mmz_flush_start(reinterpret_cast<void*>(dst->au64VirAddr[0])) != RK_SUCCESS) {
         throw std::runtime_error("IVE: Failed to begin image buffer access.");
     }
@@ -510,8 +577,6 @@ void IVE::copy_to_ive_buffer(const ImageBuffer& src, IVE_IMAGE_S* dst) {
 ImageBuffer IVE::copy_from_ive_buffer(const IVE_IMAGE_S* src, int expected_w, int expected_h) {
     if (!src || !src->au64VirAddr[0]) return ImageBuffer();
     
-    mmz_flush_start((void*)src->au64VirAddr[0]);
-    
     PIXEL_FORMAT_E out_format = ive_type_to_visiong_format(src->enType);
     int item_size_bytes = get_bytes_per_pixel_for_ive_type(src->enType);
     
@@ -529,10 +594,13 @@ ImageBuffer IVE::copy_from_ive_buffer(const IVE_IMAGE_S* src, int expected_w, in
     size_t data_size = static_cast<size_t>(w) * h * item_size_bytes;
     std::vector<unsigned char> data(data_size);
     int src_stride_bytes = ive_stride * item_size_bytes;
-    
+    if (mmz_flush_start(reinterpret_cast<void*>(src->au64VirAddr[0])) != RK_SUCCESS) {
+        throw std::runtime_error("IVE: Failed to begin image output access.");
+    }
     copy_data_from_stride(data.data(), (const void*)src->au64VirAddr[0], w * item_size_bytes, h, src_stride_bytes);
-    
-    mmz_flush_end((void*)src->au64VirAddr[0]);
+    if (mmz_flush_end(reinterpret_cast<void*>(src->au64VirAddr[0])) != RK_SUCCESS) {
+        throw std::runtime_error("IVE: Failed to end image output access.");
+    }
 
     return ImageBuffer(w, h, out_format, std::move(data));
 }
@@ -635,15 +703,23 @@ std::tuple<ImageBuffer, ImageBuffer> IVE::sobel(const ImageBuffer& src, IVE_SOBE
     IVE_HANDLE handle;
     IVE_DST_IMAGE_S* dst_h = (out_format == IVE_IMAGE_TYPE_S16C1) ? m_img_s16c1_out1.get() : m_img_u8c1_out1.get();
     IVE_DST_IMAGE_S* dst_v = (out_format == IVE_IMAGE_TYPE_S16C1) ? m_img_s16c1_out2.get() : m_img_u8c1_out2.get();
-    if (RK_MPI_IVE_Sobel(&handle, m_img_u8c1_in1.get(), dst_h, (out_ctrl == IVE_SOBEL_OUT_CTRL_BOTH ? dst_v : nullptr), &ctrl, RK_TRUE) != RK_SUCCESS) {
+    if (out_ctrl < IVE_SOBEL_OUT_CTRL_BOTH || out_ctrl >= IVE_SOBEL_OUT_CTRL_BUTT) throw std::invalid_argument("Invalid Sobel output direction.");
+    if (RK_MPI_IVE_Sobel(&handle, m_img_u8c1_in1.get(), dst_h, dst_v, &ctrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_Sobel failed.");
     }
-    ImageBuffer result_h = copy_from_ive_buffer(dst_h, m_width, m_height);
+    ImageBuffer result_h = copy_from_ive_buffer(out_ctrl == IVE_SOBEL_OUT_CTRL_VER ? dst_v : dst_h, m_width, m_height);
     ImageBuffer result_v = (out_ctrl == IVE_SOBEL_OUT_CTRL_BOTH) ? copy_from_ive_buffer(dst_v, m_width, m_height) : ImageBuffer();
     return std::make_tuple(std::move(result_h), std::move(result_v));
 }
 
 ImageBuffer IVE::canny(const ImageBuffer& src, uint16_t high_thresh, uint16_t low_thresh) {
+    return canny_ex(src, high_thresh, low_thresh, {});
+}
+
+ImageBuffer IVE::canny_ex(const ImageBuffer& src, uint16_t high_thresh, uint16_t low_thresh,
+                         const std::vector<int8_t>& mask) {
+    if (low_thresh > high_thresh) throw std::invalid_argument("Canny low threshold must not exceed its high threshold.");
+    if (!mask.empty() && mask.size() != 25) throw std::invalid_argument("Canny mask must contain 25 coefficients.");
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("canny requires a GRAY8 input.");
@@ -656,23 +732,30 @@ ImageBuffer IVE::canny(const ImageBuffer& src, uint16_t high_thresh, uint16_t lo
     ctrl.u16LowThr = low_thresh;
     
     // Use a 3x3 Sobel gradient kernel embedded in 5x5 mask layout. / 在 5x5 掩码布局中使用嵌入式 3x3 Sobel 梯度核。
-    RK_S8 mask[25] = {
+    const RK_S8 default_mask[25] = {
         0,  0,  0,  0,  0,
         0, -1,  0,  1,  0,
         0, -2,  0,  2,  0,
         0, -1,  0,  1,  0,
         0,  0,  0,  0,  0
     };
-    memcpy(ctrl.as8Mask, mask, sizeof(mask));
+    memcpy(ctrl.as8Mask, mask.empty() ? default_mask : mask.data(), sizeof(ctrl.as8Mask));
     
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_CannyEdge(&handle, m_img_u8c1_in1.get(), m_img_u8c1_out1.get(), m_mem_info.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
+    if (RK_MPI_IVE_CannyEdge(&handle, m_img_u8c1_in1.get(), m_img_u8c1_out1.get(), nullptr, &ctrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_CannyEdge failed.");
     }
     return copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
 }
 
 ImageBuffer IVE::mag_and_ang(const ImageBuffer& src, uint16_t threshold, bool return_magnitude) {
+    auto outputs = mag_and_ang_ex(src, threshold, {});
+    return return_magnitude ? std::get<0>(outputs) : std::get<1>(outputs);
+}
+
+std::tuple<ImageBuffer, ImageBuffer> IVE::mag_and_ang_ex(const ImageBuffer& src, uint16_t threshold,
+                                                       const std::vector<int8_t>& mask) {
+    if (!mask.empty() && mask.size() != 25) throw std::invalid_argument("MagAndAng mask must contain 25 coefficients.");
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("mag_and_ang requires a GRAY8 input.");
@@ -684,20 +767,39 @@ ImageBuffer IVE::mag_and_ang(const ImageBuffer& src, uint16_t threshold, bool re
     ctrl.u16Thr = threshold;
     
     // Use a 5x5 Scharr-like kernel as recommended for MagAndAng. / 按 MagAndAng 的建议使用 5x5 类 Scharr 卷积核。
-    RK_S8 mask[25] = {
+    const RK_S8 default_mask[25] = {
         -1, -2,  0,  2,  1,
         -4, -8,  0,  8,  4,
         -6, -12, 0, 12,  6,
         -4, -8,  0,  8,  4,
         -1, -2,  0,  2,  1
     };
-    memcpy(ctrl.as8Mask, mask, sizeof(mask));
+    memcpy(ctrl.as8Mask, mask.empty() ? default_mask : mask.data(), sizeof(ctrl.as8Mask));
     
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_MagAndAng(&handle, m_img_u8c1_in1.get(), m_img_s16c1_out1.get(), m_img_u8c1_out1.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
+    IVE_IMAGE_S magnitude = *m_img_s16c1_out1;
+    magnitude.enType = IVE_IMAGE_TYPE_U16C1;
+    if (RK_MPI_IVE_MagAndAng(&handle, m_img_u8c1_in1.get(), &magnitude, m_img_u8c1_out1.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_MagAndAng failed.");
     }
-    return copy_from_ive_buffer(return_magnitude ? (IVE_IMAGE_S*)m_img_s16c1_out1.get() : (IVE_IMAGE_S*)m_img_u8c1_out1.get(), m_width, m_height);
+    ImageBuffer magnitude_image = copy_from_ive_buffer(&magnitude, m_width, m_height);
+    ImageBuffer angle_image = copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
+    if (threshold != 0) {
+        // The runtime ignores u16Thr. Apply the public inclusive minimum after the hardware computation.
+        // 运行库忽略 u16Thr；硬件计算后按公开的包含等号的最小幅值规则抑制输出。
+        auto* values = static_cast<uint16_t*>(magnitude_image.get_data());
+        auto* angles = static_cast<uint8_t*>(angle_image.get_data());
+        for (int y = 0; y < m_height; ++y) {
+            for (int x = 0; x < m_width; ++x) {
+                auto& value = values[static_cast<size_t>(y) * magnitude_image.w_stride + x];
+                if (value < threshold) {
+                    value = 0;
+                    angles[static_cast<size_t>(y) * angle_image.w_stride + x] = 0;
+                }
+            }
+        }
+    }
+    return std::make_tuple(std::move(magnitude_image), std::move(angle_image));
 }
 
 ImageBuffer IVE::dilate(const ImageBuffer& src, int kernel_size) {
@@ -710,6 +812,55 @@ ImageBuffer IVE::erode(const ImageBuffer& src, int kernel_size) {
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("erode requires a GRAY8 input.");
     if (kernel_size != 3 && kernel_size != 5) throw std::invalid_argument("Kernel size must be 3 or 5.");
     return morph_op(src, false, kernel_size);
+}
+
+ImageBuffer IVE::morphology(const ImageBuffer& src, const std::vector<uint8_t>& mask, bool dilate_op) {
+    if (mask.size() != 25 || std::any_of(mask.begin(), mask.end(), [](uint8_t value) { return value > 1; })) {
+        throw std::invalid_argument("Morphology requires a 25-element mask containing only zero and one.");
+    }
+    const int active = std::accumulate(mask.begin(), mask.end(), 0);
+    if (active == 0) throw std::invalid_argument("Morphology requires at least one active mask element.");
+    if (!src.is_valid() || src.format != visiong::kGray8Format || src.width <= 0 || src.height <= 0 ||
+        src.width > 4096 || src.height > 4096 ||
+        src.w_stride < src.width || src.h_stride < src.height ||
+        static_cast<uint64_t>(src.get_size()) < static_cast<uint64_t>(src.height - 1) * src.w_stride + src.width) {
+        throw std::invalid_argument("Morphology requires a valid GRAY8 image.");
+    }
+    visiong::bufstate::prepare_cpu_read(src);
+    const auto* input = static_cast<const unsigned char*>(src.get_data());
+    for (int y = 0; y < src.height; ++y) {
+        for (int x = 0; x < src.width; ++x) {
+            const uint8_t value = input[static_cast<size_t>(y) * src.w_stride + x];
+            if (value != 0 && value != 255) throw std::invalid_argument("Binary morphology input must contain only 0 and 255.");
+        }
+    }
+    // A U16 sum and hardware threshold avoid sticky mask bits in the native morphology path.
+    // U16 求和加硬件阈值避开原生形态学路径中不能可靠清除的掩码位。
+    const std::vector<int8_t> coefficients(mask.begin(), mask.end());
+    const ImageBuffer sums = filter_ex(src, coefficients, 0, IVE_IMAGE_TYPE_U16C1);
+    ImageBuffer output = threshold_u16(sums, dilate_op ? 0 : active * 255 - 1, 65535,
+                                       IVE_THRESH_U16_MODE_U16_TO_U8_MIN_MID_MAX, 0, 255, 255);
+    auto* pixels = static_cast<unsigned char*>(output.get_data());
+    // Define outside-image pixels as zero, independently of the filter's edge extension.
+    // 图外像素定义为零，边缘结果不依赖滤波器的边界扩展规则。
+    for (int y = 0; y < src.height; ++y) {
+        for (int x = 0; x < src.width; ++x) {
+            if (x >= 2 && x < src.width - 2 && y >= 2 && y < src.height - 2) continue;
+            bool result = !dilate_op;
+            for (int ky = 0; ky < 5; ++ky) {
+                for (int kx = 0; kx < 5; ++kx) {
+                    if (!mask[ky * 5 + kx]) continue;
+                    const int sx = x + kx - 2;
+                    const int sy = y + ky - 2;
+                    const bool set = sx >= 0 && sx < src.width && sy >= 0 && sy < src.height &&
+                        input[static_cast<size_t>(sy) * src.w_stride + sx] != 0;
+                    result = dilate_op ? result || set : result && set;
+                }
+            }
+            pixels[static_cast<size_t>(y) * output.w_stride + x] = result ? 255 : 0;
+        }
+    }
+    return output;
 }
 
 ImageBuffer IVE::ordered_stat_filter(const ImageBuffer& src, IVE_ORD_STAT_FILTER_MODE_E mode) {
@@ -736,6 +887,7 @@ ImageBuffer IVE::logic_op(const ImageBuffer& src1, const ImageBuffer& src2, IVE_
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src1.width, src1.height);
     if (src1.width != src2.width || src1.height != src2.height) throw std::invalid_argument("logic_op requires images of the same size.");
+    if (src1.format != visiong::kGray8Format || src2.format != visiong::kGray8Format) throw std::invalid_argument("logic_op requires GRAY8 inputs.");
     copy_to_ive_buffer(src1, m_img_u8c1_in1.get());
     copy_to_ive_buffer(src2, m_img_u8c1_in2.get());
     IVE_HANDLE handle;
@@ -751,28 +903,12 @@ ImageBuffer IVE::logic_op(const ImageBuffer& src1, const ImageBuffer& src2, IVE_
 }
 
 ImageBuffer IVE::add(const ImageBuffer& src1, const ImageBuffer& src2) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(src1.width, src1.height);
-    if (src1.width != src2.width || src1.height != src2.height) throw std::invalid_argument("add requires images of the same size.");
-    copy_to_ive_buffer(src1, m_img_u8c1_in1.get());
-    copy_to_ive_buffer(src2, m_img_u8c1_in2.get());
-    
-    // IVE_ADD_CTRL_S: dst = u0q16X * src1 + u0q16Y * src2. / IVE_ADD_CTRL_S：dst = u0q16X * src1 + u0q16Y * src2。
-    // U0.16 fixed-point scale: 65535 ~= 1.0, 32768 = 0.5. / U0.16 定点缩放：65535≈1.0，32768=0.5。
-    // Use 0.5 / 0.5 for average blending.
-    IVE_ADD_CTRL_S ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.u0q16X = 32768;  // 0.5 in U0.16 format
-    ctrl.u0q16Y = 32768;  // 0.5 in U0.16 format
-    
-    IVE_HANDLE handle;
-    if (RK_MPI_IVE_Add(&handle, m_img_u8c1_in1.get(), m_img_u8c1_in2.get(), m_img_u8c1_out1.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
-        throw std::runtime_error("RK_MPI_IVE_Add failed.");
-    }
-    return copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
+    return add_weighted(src1, src2, 32768, 32768);
 }
 
 ImageBuffer IVE::sub(const ImageBuffer& src1, const ImageBuffer& src2, IVE_SUB_MODE_E mode) {
+    if (src1.format != visiong::kGray8Format || src2.format != visiong::kGray8Format) throw std::invalid_argument("sub requires GRAY8 inputs.");
+    if (mode != IVE_SUB_MODE_ABS && mode != IVE_SUB_MODE_SHIFT) throw std::invalid_argument("Invalid subtraction mode.");
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src1.width, src1.height);
     if (src1.width != src2.width || src1.height != src2.height) throw std::invalid_argument("sub requires images of the same size.");
@@ -790,20 +926,18 @@ ImageBuffer IVE::sub(const ImageBuffer& src1, const ImageBuffer& src2, IVE_SUB_M
 }
 
 ImageBuffer IVE::threshold(const ImageBuffer& src, uint8_t low_thresh, uint8_t high_thresh, IVE_THRESH_MODE_E mode) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(src.width, src.height);
-    if (src.format != visiong::kGray8Format) throw std::invalid_argument("threshold requires a GRAY8 input.");
-    copy_to_ive_buffer(src, m_img_u8c1_in1.get());
-    IVE_THRESH_U8_CTRL_S ctrl; memset(&ctrl, 0, sizeof(ctrl)); ctrl.enMode = mode; ctrl.u8LowThr = low_thresh; ctrl.u8HighThr = high_thresh; ctrl.u8MinVal = 0; ctrl.u8MidVal = 0; ctrl.u8MaxVal = 255;
-    IVE_HANDLE handle;
-    if (RK_MPI_IVE_Thresh(&handle, m_img_u8c1_in1.get(), m_img_u8c1_out1.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
-        throw std::runtime_error("RK_MPI_IVE_Thresh failed.");
-    }
-    return copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
+    return threshold_u8(src, low_thresh, high_thresh, mode, 0, 0, 255);
 }
 
 ImageBuffer IVE::cast_16bit_to_8bit(const ImageBuffer& src, IVE_16BIT_TO_8BIT_MODE_E mode) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (!src.is_valid() || src.width <= 0 || src.height <= 0 || src.width > 4096 || src.height > 4096 ||
+        src.w_stride < src.width || src.h_stride < src.height ||
+        static_cast<uint64_t>(src.w_stride) * sizeof(uint16_t) > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        static_cast<uint64_t>(src.get_size()) <
+            (static_cast<uint64_t>(src.height - 1) * src.w_stride + src.width) * sizeof(uint16_t)) {
+        throw std::invalid_argument("cast_16bit_to_8bit requires valid dimensions, stride and 16-bit input storage.");
+    }
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kS16C1Format && src.format != visiong::kU16C1Format) throw std::invalid_argument("cast_16bit_to_8bit requires an S16C1 or U16C1 input.");
     
@@ -859,7 +993,10 @@ ImageBuffer IVE::cast_16bit_to_8bit(const ImageBuffer& src, IVE_16BIT_TO_8BIT_MO
     control.u8Numerator = 1;
     control.u16Denominator = signed_output ? 128 : 4;
     IVE_HANDLE handle{};
-    if (RK_MPI_IVE_16BitTo8Bit(&handle, m_img_u16c1_in1.get(), m_img_u8c1_out1.get(), &control, RK_TRUE) != RK_SUCCESS) {
+    IVE_IMAGE_S cast_source = *m_img_u16c1_in1;
+    // Cast HAL adds width to this field to obtain byte stride. / Cast HAL 将宽度加到此字段以获得字节步长。
+    cast_source.au32Stride[0] = 2 * m_img_u16c1_in1->au32Stride[0] - cast_source.u32Width;
+    if (RK_MPI_IVE_16BitTo8Bit(&handle, &cast_source, m_img_u8c1_out1.get(), &control, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_16BitTo8Bit failed.");
     }
     ImageBuffer output = copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
@@ -924,8 +1061,13 @@ ImageBuffer IVE::integral(const ImageBuffer& src, IVE_INTEG_OUT_CTRL_E mode) {
     }
     IVE_IMAGE_S output = *m_img_u64c1_out1;
     if (mode == IVE_INTEG_OUT_CTRL_SUM) output.enType = IVE_IMAGE_TYPE_U32C1;
+    IVE_IMAGE_S hardware_output = output;
+    const RK_U32 item_size = mode == IVE_INTEG_OUT_CTRL_SUM ? 4 : 8;
+    // Integral HAL adds (item_size-1)*width instead of multiplying pixel stride.
+    // 积分 HAL 通过加上 (item_size-1)*width 换算步长，未直接乘像素步长。
+    hardware_output.au32Stride[0] = item_size * output.au32Stride[0] - (item_size - 1) * output.u32Width;
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_Integ(&handle, m_img_u8c1_in1.get(), &output, &ctrl, RK_TRUE) != RK_SUCCESS) {
+    if (RK_MPI_IVE_Integ(&handle, m_img_u8c1_in1.get(), &hardware_output, &ctrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_Integ failed.");
     }
     // SUM is produced as U32; keep the public U64 result format. / SUM 硬件输出为 U32，对外保持 U64 结果格式。
@@ -934,65 +1076,65 @@ ImageBuffer IVE::integral(const ImageBuffer& src, IVE_INTEG_OUT_CTRL_E mode) {
 }
 
 std::vector<Blob> IVE::ccl(const ImageBuffer& src, int min_area) {
+    return ccl_config(src, min_area, IVE_CCL_MODE_8C, 0, 0);
+}
+
+std::vector<Blob> IVE::ccl_config(const ImageBuffer& src, int min_area, IVE_CCL_MODE_E mode,
+                                  uint16_t init_area_threshold, uint16_t step) {
+    if (min_area < 0) throw std::invalid_argument("CCL minimum area cannot be negative.");
+    if (mode != IVE_CCL_MODE_4C && mode != IVE_CCL_MODE_8C) throw std::invalid_argument("Invalid CCL connectivity.");
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("ccl requires a GRAY8 (binarized) input.");
     copy_to_ive_buffer(src, m_img_u8c1_out1.get()); 
-    if (m_mem_info->u32Size < sizeof(IVE_CCBLOB_S)) throw std::runtime_error("Pre-allocated memory is too small for CCL.");
-    IVE_CCL_CTRL_S ctrl; memset(&ctrl, 0, sizeof(ctrl)); ctrl.enMode = IVE_CCL_MODE_8C; ctrl.stMem = *m_mem_info.get();
+    IVE_MEM_INFO_S blob_memory{};
+    if (create_mem_info(&blob_memory, sizeof(IVE_CCBLOB_S)) != RK_SUCCESS) throw std::runtime_error("Failed to allocate CCL output memory.");
+    IveMmzGuard blob_guard;
+    blob_guard.set(blob_memory.u64PhyAddr, blob_memory.u64VirAddr);
+    void* blob_address = reinterpret_cast<void*>(blob_memory.u64VirAddr);
+    if (mmz_flush_start(blob_address) != RK_SUCCESS) throw std::runtime_error("Failed to initialize CCL output memory.");
+    std::memset(blob_address, 0, sizeof(IVE_CCBLOB_S));
+    if (mmz_flush_end(blob_address) != RK_SUCCESS) throw std::runtime_error("Failed to synchronize CCL output memory.");
+    IVE_CCL_CTRL_S ctrl{};
+    ctrl.enMode = mode;
+    ctrl.u16InitAreaThr = init_area_threshold;
+    ctrl.u16Step = step;
+    ctrl.stMem = *m_mem_info;
     IVE_HANDLE handle;
-    if (RK_MPI_IVE_CCL(&handle, m_img_u8c1_out1.get(), m_mem_info.get(), &ctrl, RK_TRUE) != RK_SUCCESS) {
+    if (RK_MPI_IVE_CCL(&handle, m_img_u8c1_out1.get(), &blob_memory, &ctrl, RK_TRUE) != RK_SUCCESS) {
         throw std::runtime_error("RK_MPI_IVE_CCL failed.");
     }
-    mmz_flush_start((void*)m_mem_info->u64VirAddr);
-    IVE_CCBLOB_S* blob_info = (IVE_CCBLOB_S*)m_mem_info->u64VirAddr;
+    if (mmz_flush_start(blob_address) != RK_SUCCESS) throw std::runtime_error("Failed to read CCL output memory.");
+    IVE_CCBLOB_S blob_copy{};
+    std::memcpy(&blob_copy, blob_address, sizeof(blob_copy));
+    if (mmz_flush_end(blob_address) != RK_SUCCESS) throw std::runtime_error("Failed to end CCL output access.");
+    const IVE_CCBLOB_S* blob_info = &blob_copy;
+    if (blob_info->s8LabelStatus != 0) {
+        throw std::runtime_error("IVE CCL could not label all regions.");
+    }
     std::vector<Blob> results;
-    for (int i = 0; i < blob_info->u8RegionNum; ++i) {
-        if ((int)blob_info->astRegion[i].u32Area > min_area) {
+    for (int i = 0; i < IVE_MAX_REGION_NUM; ++i) {
+        if (blob_info->astRegion[i].u32Area != 0 && blob_info->astRegion[i].u32Area >= static_cast<unsigned int>(min_area)) {
             results.emplace_back(blob_info->astRegion[i].u16Left, blob_info->astRegion[i].u16Top,
                                  blob_info->astRegion[i].u16Right - blob_info->astRegion[i].u16Left + 1,
                                  blob_info->astRegion[i].u16Bottom - blob_info->astRegion[i].u16Top + 1,
-                                 0, 0, blob_info->astRegion[i].u32Area);
+                                 (blob_info->astRegion[i].u16Left + blob_info->astRegion[i].u16Right) / 2,
+                                 (blob_info->astRegion[i].u16Top + blob_info->astRegion[i].u16Bottom) / 2,
+                                 blob_info->astRegion[i].u32Area, static_cast<unsigned int>(i + 1));
         }
     }
-    mmz_flush_end((void*)m_mem_info->u64VirAddr);
     return results;
 }
 
 double IVE::ncc(const ImageBuffer& src1, const ImageBuffer& src2) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(src1.width, src1.height);
-    if (src1.width != src2.width || src1.height != src2.height) throw std::invalid_argument("ncc requires images of the same size.");
-    copy_to_ive_buffer(src1, m_img_u8c1_in1.get());
-    copy_to_ive_buffer(src2, m_img_u8c1_in2.get());
-    if (m_mem_info->u32Size < sizeof(IVE_NCC_DST_MEM_S)) throw std::runtime_error("Pre-allocated memory is too small for NCC.");
-    
-    IVE_HANDLE handle;
-    if (RK_MPI_IVE_NCC(&handle, m_img_u8c1_in1.get(), m_img_u8c1_in2.get(), m_mem_info.get(), RK_TRUE) != RK_SUCCESS) {
-        throw std::runtime_error("RK_MPI_IVE_NCC failed.");
-    }
-
-    mmz_flush_start((void*)m_mem_info->u64VirAddr);
-    IVE_NCC_DST_MEM_S* ncc_result = (IVE_NCC_DST_MEM_S*)m_mem_info->u64VirAddr;
-    
-    // Read NCC aggregates from shared memory. / 从共享内存中读取 NCC 聚合结果。
-    double numerator = static_cast<double>(ncc_result->u64Numerator);
-    double quad_sum1 = static_cast<double>(ncc_result->u64QuadSum1);
-    double quad_sum2 = static_cast<double>(ncc_result->u64QuadSum2);
-    
-    mmz_flush_end((void*)m_mem_info->u64VirAddr);
-
-    double denominator = sqrt(quad_sum1) * sqrt(quad_sum2);
-    if (denominator < 1e-9) { // avoid unstable divide-by-zero path
-        return 0.0;
-    }
-
-    // Final normalized NCC score. / 最终归一化 NCC 得分。
-    return numerator / denominator;
+    const auto aggregates = ncc_raw(src1, src2);
+    const double denominator = std::sqrt(static_cast<double>(std::get<1>(aggregates))) *
+                               std::sqrt(static_cast<double>(std::get<2>(aggregates)));
+    return denominator > 0.0 ? static_cast<double>(std::get<0>(aggregates)) / denominator : 0.0;
 }
 
 ImageBuffer IVE::csc(const ImageBuffer& src, IVE_CSC_MODE_E mode, bool input_full_range) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     const CscModeTraits traits = get_csc_mode_traits(mode);
     if (input_full_range && !traits.yuv_input) throw std::invalid_argument("input_full_range applies only to YUV input.");
@@ -1001,12 +1143,56 @@ ImageBuffer IVE::csc(const ImageBuffer& src, IVE_CSC_MODE_E mode, bool input_ful
 
     const int w = src_ptr->width;
     const int h = src_ptr->height;
+    if (!src.is_valid() || w <= 0 || h <= 0 || w > 4096 || h > 4096 ||
+        src.w_stride < w || src.h_stride < h) {
+        throw std::invalid_argument("IVE CSC requires valid image dimensions and strides.");
+    }
+    const uint64_t input_size = traits.yuv_input ?
+        static_cast<uint64_t>(src.w_stride) * src.h_stride + static_cast<uint64_t>(src.w_stride) * (h / 2) :
+        (static_cast<uint64_t>(h - 1) * src.w_stride + w) * 3;
+    if (static_cast<uint64_t>(src.get_size()) < input_size ||
+        (!traits.yuv_input && static_cast<uint64_t>(src.w_stride) * 3 > static_cast<uint64_t>(std::numeric_limits<int>::max()))) {
+        throw std::invalid_argument("IVE CSC input storage or byte stride is invalid.");
+    }
     if ((traits.yuv_input || traits.yuv_output) && ((w & 1) || (h & 1))) {
         throw std::invalid_argument("IVE YUV conversion requires even image dimensions.");
     }
     const int stride = calc_stride(w, kImageAlign);
     const IVE_IMAGE_TYPE_E src_type = traits.yuv_input ? IVE_IMAGE_TYPE_YUV420SP : IVE_IMAGE_TYPE_U8C3_PACKAGE;
     const IVE_IMAGE_TYPE_E dst_type = traits.yuv_output ? IVE_IMAGE_TYPE_YUV420SP : IVE_IMAGE_TYPE_U8C3_PACKAGE;
+
+    if (h > 2046) {
+        // Preserve the cached common-size path; tall frames share the compact byte interface's tiling.
+        // 保留常用尺寸的缓存路径；高图像复用紧凑字节接口的分块布局。
+        visiong::bufstate::prepare_cpu_read(*src_ptr);
+        const auto* pixels = static_cast<const unsigned char*>(src_ptr->get_data());
+        const size_t plane_size = static_cast<size_t>(w) * h;
+        std::vector<uint8_t> compact(traits.yuv_input ? plane_size * 3 / 2 : plane_size * 3);
+        if (traits.yuv_input) {
+            for (int y = 0; y < h; ++y) {
+                std::memcpy(compact.data() + static_cast<size_t>(y) * w,
+                            pixels + static_cast<size_t>(y) * src_ptr->w_stride, w);
+            }
+            const size_t chroma_offset = static_cast<size_t>(src_ptr->w_stride) * src_ptr->h_stride;
+            for (int y = 0; y < h / 2; ++y) {
+                std::memcpy(compact.data() + plane_size + static_cast<size_t>(y) * w,
+                            pixels + chroma_offset + static_cast<size_t>(y) * src_ptr->w_stride, w);
+            }
+        } else {
+            for (int y = 0; y < h; ++y) {
+                std::memcpy(compact.data() + static_cast<size_t>(y) * w * 3,
+                            pixels + static_cast<size_t>(y) * src_ptr->w_stride * 3, static_cast<size_t>(w) * 3);
+            }
+        }
+        const bool bgr_order = !traits.yuv_input && src_ptr->format == RK_FMT_BGR888;
+        const bool vu_order = traits.yuv_input && src_ptr->format == RK_FMT_YUV420SP_VU;
+        lock.unlock();
+        std::vector<uint8_t> output = csc_bytes(std::move(compact), w, h, src_type, dst_type, mode,
+                                               input_full_range, bgr_order, vu_order);
+        const PIXEL_FORMAT_E format = traits.yuv_output ? RK_FMT_YUV420SP :
+            (traits.hsv_output ? visiong::kHsv888Format : RK_FMT_RGB888);
+        return ImageBuffer(w, h, format, std::move(output));
+    }
 
     IVE_SRC_IMAGE_S src_ive;
     std::memset(&src_ive, 0, sizeof(src_ive));
@@ -1031,7 +1217,7 @@ ImageBuffer IVE::csc(const ImageBuffer& src, IVE_CSC_MODE_E mode, bool input_ful
     mmz_flush_start(reinterpret_cast<void*>(src_ive.au64VirAddr[0]));
     if (traits.yuv_input) {
         const int y_src_stride = src_ptr->w_stride;
-        const int y_plane_size = y_src_stride * src_ptr->h_stride;
+        const size_t y_plane_size = static_cast<size_t>(y_src_stride) * src_ptr->h_stride;
         copy_image_rows(src_ive.au64VirAddr[0], stride, src_data, y_src_stride, h, w, false, false,
                 input_full_range ? 219 : 0);
         copy_image_rows(src_ive.au64VirAddr[1], stride, src_data + y_plane_size, y_src_stride, h / 2, w,
@@ -1135,25 +1321,11 @@ ImageBuffer IVE::rgb_to_hsv(const ImageBuffer& src, bool full_range) {
 
 // DMA and lookup operations. / DMA 及查表算子。
 ImageBuffer IVE::dma(const ImageBuffer& src, IVE_DMA_MODE_E mode) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    ensure_buffers(src.width, src.height);
-    copy_to_ive_buffer(src, m_img_u8c1_in1.get());
-    IVE_SRC_DATA_S stSrcData;
-    IVE_DST_DATA_S stDstData;
-    RK_MPI_IVE_CvtImageToData(m_img_u8c1_in1.get(), &stSrcData);
-    RK_MPI_IVE_CvtImageToData(m_img_u8c1_out1.get(), &stDstData);
-    IVE_DMA_CTRL_S stCtrl;
-    memset(&stCtrl, 0, sizeof(stCtrl));
-    stCtrl.enMode = mode;
-    stCtrl.u64Val = 0;
-    IVE_HANDLE handle;
-    if (RK_MPI_IVE_DMA(&handle, &stSrcData, &stDstData, &stCtrl, RK_TRUE) != RK_SUCCESS) {
-         throw std::runtime_error("RK_MPI_IVE_DMA failed.");
-    }
-    return copy_from_ive_buffer(m_img_u8c1_out1.get(), m_width, m_height);
+    return dma_transfer(src, mode);
 }
 
 ImageBuffer IVE::cast_8bit_to_8bit(const ImageBuffer& src, int8_t bias, uint8_t numerator, uint8_t denominator) {
+    if (denominator == 0) throw std::invalid_argument("Cast denominator must be positive.");
     std::lock_guard<std::mutex> lock(m_mutex);
     ensure_buffers(src.width, src.height);
     if (src.format != visiong::kGray8Format) throw std::invalid_argument("cast_8bit_to_8bit requires a GRAY8 input.");

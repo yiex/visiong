@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # KWS RV1106 Worklog
 
-Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; paths below are relative to that workspace.
+Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; host paths below are relative to that workspace. `BOARD_PACKAGE_DIR` denotes the package staging directory on the board.
 
 ## Goal
 
@@ -87,7 +87,7 @@ After fixing that:
 - local artifact root:
   - `${KWS_WORKSPACE}/github_action_build_audio_fix`
 - board override directory:
-  - `/root/visiong_action_pkg_fix`
+  - `${BOARD_PACKAGE_DIR}/frontend_fix`
 
 Board results from that artifact:
 
@@ -106,7 +106,7 @@ Board results from that artifact:
 - local artifact root:
   - `${KWS_WORKSPACE}/github_action_build_audio_neon`
 - board override directory:
-  - `/root/visiong_action_pkg_neon`
+  - `${BOARD_PACKAGE_DIR}/neon`
 
 What was tested:
 
@@ -128,7 +128,7 @@ This was intentionally not kept.
 - local artifact root:
   - `${KWS_WORKSPACE}/github_action_build_kws_wrapper`
 - board override directory:
-  - `/root/visiong_action_pkg_kws`
+  - `${BOARD_PACKAGE_DIR}/kws`
 
 Board validation result:
 

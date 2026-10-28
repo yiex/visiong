@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: LGPL-3.0-or-later -->
 # RV1106 KWS Performance And Porting Report
 
-Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; paths below are relative to that workspace.
+Path notation: `KWS_WORKSPACE` refers to the KWS demo workspace; host paths below are relative to that workspace. `BOARD_PACKAGE_DIR` denotes the package staging directory on the board.
 
 ## Executive Summary
 
@@ -40,7 +40,7 @@ Cloud-built artifact that validated the native frontend fix:
 - workflow run: `23943474500`
 - artifact id: `6258357084`
 - local download root: `${KWS_WORKSPACE}/github_action_build_audio_fix`
-- board override path: `/root/visiong_action_pkg_fix`
+- board override path: `${BOARD_PACKAGE_DIR}/frontend_fix`
 
 Board-side result files:
 
@@ -144,7 +144,7 @@ Validated cloud-built artifact:
 - workflow run: `23952785354`
 - artifact id: `6261923551`
 - local artifact root: `${KWS_WORKSPACE}/github_action_build_kws_wrapper`
-- board override path: `/root/visiong_action_pkg_kws`
+- board override path: `${BOARD_PACKAGE_DIR}/kws`
 
 Board result from the dedicated wrapper:
 

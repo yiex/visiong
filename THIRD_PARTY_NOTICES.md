@@ -40,6 +40,12 @@ against the Rockchip examples distributed in
 The VisionG wrappers remain project-owned glue. Vendor headers, libraries and
 their original copyright and license terms remain external dependencies.
 
+`scripts/patch_ive_lk_runtime.py` creates a separate corrected copy of one
+verified external IVE runtime build. It does not distribute that runtime or
+change its copyright, license or redistribution terms. Original and corrected
+vendor binaries are excluded from the public source archive. The correction
+and measured scope are documented in `docs/IVE_LK_RUNTIME.md`.
+
 ## External build-time dependencies not bundled in source releases
 
 These inputs may be fetched or staged during CI/local builds, but are intentionally not part of the public source archive:

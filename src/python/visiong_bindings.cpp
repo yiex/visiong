@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "internal/bindings_common.h"
+#include "internal/lk_tracker_appearance.h"
 #include "visiong/core/BufferStateMachine.h"
 #include "python/internal/license_guard.h"
 #include "visiong/common/LegacyKey.h"
@@ -70,6 +71,7 @@ PYBIND11_MODULE(_visiong, m) {
     bind_hw(m);
 #if VISIONG_WITH_IVE
     bind_ive(m);
+    visiong::python::bind_lk_tracker_appearance(m);
 #endif
     bind_io_devices(m);
     bind_pinmux(m);

@@ -137,7 +137,7 @@ RK_S32 mmz_free(void* vir_addr) {
 }
 
 RK_S32 create_image(IVE_IMAGE_S* image, IVE_IMAGE_TYPE_E type, RK_U32 width, RK_U32 height) {
-    if (!image) {
+    if (!image || width == 0 || height == 0 || width > 4096 || height > 4096) {
         return RK_FAILURE;
     }
 

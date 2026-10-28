@@ -20,7 +20,10 @@ def require_any(entries: Set[str], candidates: Sequence[str], label: str) -> Non
 
 def main(argv: Sequence[str]) -> int:
     if len(argv) != 3:
-        print("usage: check_release_archives.py <visiong_cpp.zip> <visiong_python.zip>", file=sys.stderr)
+        print(
+            "usage: check_release_archives.py <visiong_cpp.zip> <visiong_python.zip>",
+            file=sys.stderr,
+        )
         return 1
 
     cpp_zip = Path(argv[1]).resolve()
@@ -32,7 +35,9 @@ def main(argv: Sequence[str]) -> int:
     require_any(cpp_entries, ["VISIONG_COMPONENTS.txt"], "cpp manifest")
     require_any(cpp_entries, ["cmake/VisionGConfig.cmake"], "cpp CMake config")
     require_any(cpp_entries, ["lib/libvisiong.so", "lib/libvisiong.a"], "cpp library")
-    require_any(cpp_entries, ["drivers/visiong_hw/visiong_hw.ko"], "cpp hardware helper module")
+    require_any(
+        cpp_entries, ["drivers/visiong_hw/visiong_hw.ko"], "cpp hardware helper module"
+    )
     if not any(entry.startswith("include/visiong/") for entry in cpp_entries):
         raise RuntimeError("missing public C++ headers under include/visiong/")
 
@@ -40,6 +45,13 @@ def main(argv: Sequence[str]) -> int:
     require_any(py_entries, ["_visiong.so"], "python extension module")
     require_any(py_entries, ["visiong.py"], "python shim")
     require_any(py_entries, ["visiong_hw.ko"], "python hardware helper module")
+    require_any(py_entries, ["docs/IVE.md"], "IVE usage notes")
+    require_any(
+        py_entries, ["scripts/check_ive_gmm.py"], "IVE background-model validation"
+    )
+    require_any(
+        py_entries, ["scripts/run_with_ive_runtime.py"], "explicit IVE runtime loader"
+    )
 
     print(f"release archives look good: {cpp_zip.name}, {py_zip.name}")
     return 0

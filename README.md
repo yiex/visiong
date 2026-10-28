@@ -28,8 +28,7 @@ visiong 库并未进行功能限制、绑定和收费。任何使用了 Luckfox 
 - JPEG、RTSP、HTTP-FLV、HTTP-MJPEG、Framebuffer、UDP 等显示/传输路径
 - 硬件加速的格式转换、缩放、裁切、letterbox、绘制等图像操作
 - Rockchip NPU 的 Python 封装与后处理辅助
-- [YOLO26 one2one 检测](docs/YOLO26.md)：沿用 NPU 接口，支持 INT8/NEON 后处理，无需 NMS
-- [IVE 硬件图像处理](docs/IVE.md)：金字塔 LK 光流、格式转换、整数算子与背景模型
+- [IVE 硬件图像处理与运动分析](docs/IVE.md)
 - 面向板端脚本、快速验证和部署的 Python 绑定
 
 ## 开发板上 Python 部署方式
@@ -54,7 +53,7 @@ VisionG 使用到的最小 OpenCV 子集已经静态链接进 `_visiong.so`，
 
 - VisionG 运行时会动态加载一部分 Rockchip 用户态库。
 - 开发板本身仍然需要提供 SDK 镜像中常见的那些运行库，通常位于 `/oem/usr/lib`。
-- 如果你在模型推理时遇到算子不支持、模型运行异常、或者 RKNN 行为不稳定，优先把 `librknnmrt.so` 更新到 Rockchip 官方最新版本。
+- 推理异常或同一输入的结果不稳定时，检查模型与运行库兼容性，以及设备的时钟和供电配置；使用板端已验证的稳定设置，并按需更新 Rockchip 官方运行库。
 
 库链接：
 
@@ -308,8 +307,7 @@ Any RV1103 / RV1106 development board can use VisionG and the vigide plugin as l
 - Display and transport paths including JPEG, RTSP, HTTP-FLV, HTTP-MJPEG, framebuffer, and UDP
 - Hardware-accelerated image operations such as format conversion, resize, crop, letterbox, and drawing
 - Python bindings for the Rockchip NPU plus post-processing helpers
-- [YOLO26 one2one detection](docs/YOLO26.md): shared NPU API with INT8/NEON post-processing and no NMS
-- [IVE hardware image processing](docs/IVE.md): pyramidal LK, color conversion, integer operators and background models
+- [IVE hardware image processing and motion analysis](docs/IVE.md)
 - Python bindings intended for on-board scripting, rapid validation, and deployment
 
 ## Python Deployment on the Board
@@ -334,7 +332,7 @@ so you do not need to deploy separate `libopencv_*.so` files.
 
 - VisionG dynamically loads part of the Rockchip user-space runtime libraries at execution time.
 - The board itself must still provide the common runtime libraries that usually come with the SDK image, typically under `/oem/usr/lib`.
-- If you hit unsupported operators, abnormal model execution, or unstable RKNN behavior during inference, update `librknnmrt.so` to the latest Rockchip-provided version first.
+- For inference errors or changing results on identical input, check model/runtime compatibility and the board's clock and power configuration. Use verified stable settings and update the Rockchip runtime when needed.
 
 Library link:
 

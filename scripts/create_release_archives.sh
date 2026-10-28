@@ -39,6 +39,10 @@ copy_common_docs() {
             cp -a "${ROOT_DIR}/${item}" "${dst}/"
         fi
     done
+    mkdir -p "${dst}/docs"
+    for item in "${ROOT_DIR}"/docs/IVE*.md; do
+        [[ -f "${item}" ]] && cp -f "${item}" "${dst}/docs/"
+    done
 }
 
 copy_tree_contents() {
@@ -144,6 +148,15 @@ write_component_manifest "${CPP_STAGE}" "${VISIONG_ENABLE_IVE}" "${VISIONG_ENABL
 
 cp -f "${BUILD_DIR}/_visiong.so" "${PY_STAGE}/_visiong.so"
 cp -f "${BUILD_DIR}/visiong.py" "${PY_STAGE}/visiong.py"
+mkdir -p "${PY_STAGE}/scripts" "${PY_STAGE}/examples"
+for item in audit_ive_coverage.py capture_ive_gradients.py capture_ive_hsv.py \
+    capture_ive_yuv.py check_ive_csc.py check_ive_csc_422_chunks.py \
+    check_ive_edges_logic.py check_ive_extended.py check_ive_gmm.py \
+    check_ive_hsv_reference.py check_ive_modes.py ive_hsv_reference.py \
+    patch_ive_lk_runtime.py run_with_ive_runtime.py; do
+    cp -f "${ROOT_DIR}/scripts/${item}" "${PY_STAGE}/scripts/"
+done
+cp -f "${ROOT_DIR}/examples/ive_lk_tracker.py" "${PY_STAGE}/examples/"
 cp -f "${VISIONG_HW_KO}" "${PY_STAGE}/visiong_hw.ko"
 cp -f "${VISIONG_HW_KO}" "${CPP_STAGE}/drivers/visiong_hw/visiong_hw.ko"
 write_component_manifest "${PY_STAGE}" "${VISIONG_ENABLE_IVE}" "${VISIONG_ENABLE_NPU}" "${VISIONG_ENABLE_GUI}"

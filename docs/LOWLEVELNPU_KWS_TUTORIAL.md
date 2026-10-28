@@ -64,6 +64,9 @@ Set the following variables in the Linux shell before running the examples:
 ```sh
 export VISIONG_ROOT="$HOME/visiong"
 export KWS_WORKSPACE="$HOME/visiong-kws-demo"
+# Set these in the board shell for the deployment examples.
+export BOARD_KWS_DIR="$HOME/kws-demo"
+export BOARD_PACKAGE_DIR="$HOME/visiong-packages"
 ```
 
 Repository worktree:
@@ -91,15 +94,19 @@ Detailed engineering report:
 For normal Python deployment, prefer the dedicated high-level wrapper:
 
 ```python
+import os
+from pathlib import Path
+
 import numpy as np
 import visiong as vg
 
+kws_root = Path(os.environ.get("BOARD_KWS_DIR", "kws-demo"))
 kws = vg.KWS(
-    "/root/visiong_kws_demo_c64/kws_ds_cnn.rknn",
-    "/root/visiong_kws_demo_c64/board_bundle/labels.txt",
+    str(kws_root / "kws_ds_cnn.rknn"),
+    str(kws_root / "board_bundle/labels.txt"),
 )
 
-wav_result = kws.infer_wav("/root/visiong_kws_demo_c64/board_bundle/eval/yes/022cd682_nohash_0.wav")
+wav_result = kws.infer_wav(str(kws_root / "board_bundle/eval/yes/022cd682_nohash_0.wav"))
 print(wav_result.label, wav_result.score)
 
 audio = np.zeros(kws.clip_samples, dtype=np.int16)
@@ -322,10 +329,10 @@ Validation setup:
 - workflow: `build-binary-artifact`
 - workflow run: `23943474500`
 - downloaded artifact root: `${KWS_WORKSPACE}/github_action_build_audio_fix`
-- deployed board override path: `/root/visiong_action_pkg_fix`
+- deployed board override path: `${BOARD_PACKAGE_DIR}/frontend_fix`
 - board execution path:
-  - `PYTHONPATH=/root/visiong_action_pkg_fix:/root/visiong_kws_demo_c64/scripts`
-  - model and evaluation WAVs reused from `/root/visiong_kws_demo_c64`
+  - `PYTHONPATH=${BOARD_PACKAGE_DIR}/frontend_fix:${BOARD_KWS_DIR}/scripts`
+  - model and evaluation WAVs reused from `${BOARD_KWS_DIR}`
 
 For this run, the validation script used only:
 
@@ -497,39 +504,39 @@ Board eval on older runtime:
 
 ```bash
 python3 board_kws_demo.py \
-  --model /root/visiong_kws_demo_c64/kws_ds_cnn.rknn \
-  --labels /root/visiong_kws_demo_c64/board_bundle/labels.txt \
-  --manifest /root/visiong_kws_demo_c64/board_bundle/eval_manifest.tsv \
+  --model ${BOARD_KWS_DIR}/kws_ds_cnn.rknn \
+  --labels ${BOARD_KWS_DIR}/board_bundle/labels.txt \
+  --manifest ${BOARD_KWS_DIR}/board_bundle/eval_manifest.tsv \
   --input-strategy compat \
   --warmup-count 10 \
-  --summary-json /root/visiong_kws_demo_c64/board_summary.json
+  --summary-json ${BOARD_KWS_DIR}/board_summary.json
 ```
 
 Board eval on fixed runtime:
 
 ```bash
-PYTHONPATH=/root/visiong_action_pkg_fix:/root/visiong_kws_demo_c64/scripts \
+PYTHONPATH=${BOARD_PACKAGE_DIR}/frontend_fix:${BOARD_KWS_DIR}/scripts \
 python3 board_kws_demo.py \
-  --model /root/visiong_kws_demo_c64/kws_ds_cnn.rknn \
-  --labels /root/visiong_kws_demo_c64/board_bundle/labels.txt \
-  --manifest /root/visiong_kws_demo_c64/board_bundle/eval_manifest.tsv \
+  --model ${BOARD_KWS_DIR}/kws_ds_cnn.rknn \
+  --labels ${BOARD_KWS_DIR}/board_bundle/labels.txt \
+  --manifest ${BOARD_KWS_DIR}/board_bundle/eval_manifest.tsv \
   --input-strategy array-only \
   --warmup-count 10 \
-  --summary-json /root/visiong_kws_demo_c64/board_summary_fixed.json
+  --summary-json ${BOARD_KWS_DIR}/board_summary_fixed.json
 ```
 
 Board eval on fixed runtime with the native audio frontend:
 
 ```bash
-PYTHONPATH=/root/visiong_action_pkg_fix:/root/visiong_kws_demo_c64/scripts \
+PYTHONPATH=${BOARD_PACKAGE_DIR}/frontend_fix:${BOARD_KWS_DIR}/scripts \
 python3 board_kws_demo.py \
-  --model /root/visiong_kws_demo_c64/kws_ds_cnn.rknn \
-  --labels /root/visiong_kws_demo_c64/board_bundle/labels.txt \
-  --manifest /root/visiong_kws_demo_c64/board_bundle/eval_manifest.tsv \
+  --model ${BOARD_KWS_DIR}/kws_ds_cnn.rknn \
+  --labels ${BOARD_KWS_DIR}/board_bundle/labels.txt \
+  --manifest ${BOARD_KWS_DIR}/board_bundle/eval_manifest.tsv \
   --frontend-backend native \
   --input-strategy array-only \
   --warmup-count 10 \
-  --summary-json /root/visiong_kws_demo_c64/board_summary_native.json
+  --summary-json ${BOARD_KWS_DIR}/board_summary_native.json
 ```
 
 ## Result

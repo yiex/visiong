@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 import ctypes
 import importlib
+import math as _math
 import os
 import re
 import struct
@@ -2423,6 +2424,733 @@ class PWM:
 
 MMIO = Reg
 Register = Reg
+
+
+class LKTracker:
+    """Optional hardware LK tracking with measured velocity and round-trip checks.
+    使用实测速度预测及前后向校验的可选硬件 LK 跟踪器。
+    """
+
+    def __init__(
+        self,
+        max_points=100,
+        min_distance=10,
+        quality_level=25,
+        max_level=3,
+        iterations=20,
+        min_eigenvalue=100,
+        epsilon=32,
+        max_step=32.0,
+        fb_threshold=1.0,
+        border=16,
+        max_error=None,
+        max_interval=0.5,
+        ive=None,
+        appearance=True,
+        normalize_brightness=True,
+        max_patch_error=12.0,
+        ambiguity_ratio=0.2,
+        ambiguity_radius=16,
+        appearance_backend="auto",
+    ):
+        self.max_points = self._integer(max_points, "max_points", 1, 500)
+        self.min_distance = self._integer(min_distance, "min_distance", 1, 65535)
+        self.quality_level = self._integer(quality_level, "quality_level", 1, 255)
+        self.max_level = self._integer(max_level, "max_level", 0, 3)
+        self.iterations = self._integer(iterations, "iterations", 1, 20)
+        self.min_eigenvalue = self._integer(min_eigenvalue, "min_eigenvalue", 0, 255)
+        self.epsilon = self._integer(epsilon, "epsilon", 0, 65535)
+        self.border = self._integer(border, "border", 0, 65535)
+        self.max_step = self._number(max_step, "max_step", positive=True)
+        self.fb_threshold = self._number(fb_threshold, "fb_threshold")
+        self.max_error = (
+            None if max_error is None else self._number(max_error, "max_error")
+        )
+        self.max_interval = (
+            None
+            if max_interval is None
+            else self._number(max_interval, "max_interval", positive=True)
+        )
+        self._ive = IVE() if ive is None else ive
+        if not isinstance(appearance, bool) or not isinstance(
+            normalize_brightness, bool
+        ):
+            raise ValueError("appearance and normalize_brightness must be bool")
+        self.appearance = appearance
+        self.normalize_brightness = normalize_brightness
+        self.max_patch_error = self._number(max_patch_error, "max_patch_error")
+        self.ambiguity_ratio = self._number(ambiguity_ratio, "ambiguity_ratio")
+        if self.ambiguity_ratio > 1:
+            raise ValueError("ambiguity_ratio must be in [0,1]")
+        self.ambiguity_radius = self._integer(
+            ambiguity_radius, "ambiguity_radius", 3, 32
+        )
+        if appearance_backend not in ("auto", "python", "native"):
+            raise ValueError("appearance_backend must be auto, python, or native")
+        self.appearance_backend = appearance_backend
+        native = globals().get("_lk_tracker_appearance")
+        self._appearance_native = (
+            native
+            if self.appearance and appearance_backend != "python" and callable(native)
+            else None
+        )
+        if (
+            self.appearance
+            and appearance_backend == "native"
+            and self._appearance_native is None
+        ):
+            raise RuntimeError("The native LK appearance helper is unavailable")
+        offsets = set()
+        for distance in range(3, self.ambiguity_radius + 1):
+            offsets.update(
+                (sx * distance, sy * distance)
+                for sx, sy in (
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                )
+            )
+        offsets.update(
+            (dx, dy)
+            for dx in range(-self.ambiguity_radius, self.ambiguity_radius + 1, 4)
+            for dy in range(-self.ambiguity_radius, self.ambiguity_radius + 1, 4)
+            if max(abs(dx), abs(dy)) >= 3
+        )
+        self._ambiguity_offsets = sorted(
+            offsets, key=lambda point: (point[0] ** 2 + point[1] ** 2, point)
+        )
+        self._lock = threading.RLock()
+        self.reset()
+
+    @staticmethod
+    def _integer(value, name, minimum, maximum):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError(f"{name} must be an integer in [{minimum},{maximum}]")
+        return value
+
+    @staticmethod
+    def _number(value, name, positive=False):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be finite")
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{name} must be finite") from None
+        if not _math.isfinite(value) or value < 0 or (positive and value == 0):
+            raise ValueError(
+                f"{name} must be finite and {'positive' if positive else 'nonnegative'}"
+            )
+        return value
+
+    @staticmethod
+    def _pixel(value):
+        return int(_math.floor(value + 0.5))
+
+    @staticmethod
+    def _median(values):
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        return (
+            ordered[middle]
+            if len(ordered) % 2
+            else (ordered[middle - 1] + ordered[middle]) / 2.0
+        )
+
+    def _inside(self, point, shape):
+        x, y = point
+        width, height = shape
+        return (
+            self.border <= x < width - self.border
+            and self.border <= y < height - self.border
+        )
+
+    @staticmethod
+    def _energy(values):
+        return max(
+            0.0, sum(value * value for value in values) - sum(values) ** 2 / len(values)
+        )
+
+    @staticmethod
+    def _patch(data, width, x, y, sparse=False):
+        offsets = (-3, 0, 3) if sparse else range(-3, 4)
+        return [data[(y + dy) * width + x + dx] for dy in offsets for dx in offsets]
+
+    def _appearance_at(self, data, shape, point, checks, cache):
+        """Reject measured low texture or a measured nearby similar patch.
+        拒绝实测低纹理及附近存在实测相似块的点。
+        """
+        if not self.appearance:
+            return None
+        point = (self._pixel(point[0]), self._pixel(point[1]))
+        if point in cache:
+            return cache[point]
+        started = time.perf_counter()
+        width, height = shape
+        x, y = point
+        reason, evidence = None, None
+        if not 3 <= x < width - 3 or not 3 <= y < height - 3:
+            reason = "patch_border"
+        else:
+            patch = self._patch(data, width, x, y)
+            energy = self._energy(patch)
+            if energy < 49 * 16:
+                reason = "low_texture"
+            else:
+                descriptor = self._patch(data, width, x, y, True)
+                descriptor_energy = self._energy(descriptor)
+                ratio2 = self.ambiguity_ratio**2
+                fine_checks = 0
+                for dx, dy in self._ambiguity_offsets:
+                    xx, yy = x + dx, y + dy
+                    if not 3 <= xx < width - 3 or not 3 <= yy < height - 3:
+                        continue
+                    checks["ambiguity_candidates"] += 1
+                    other = self._patch(data, width, xx, yy, True)
+                    if self._energy(
+                        [a - b for a, b in zip(descriptor, other)]
+                    ) > ratio2 * max(descriptor_energy, 1):
+                        continue
+                    checks["ambiguity_fine_checks"] += 1
+                    fine_checks += 1
+                    other_patch = self._patch(data, width, xx, yy)
+                    difference = self._energy(
+                        [a - b for a, b in zip(patch, other_patch)]
+                    )
+                    if difference <= ratio2 * energy:
+                        reason = "ambiguous"
+                        evidence = dict(
+                            point=list(point),
+                            offset=[dx, dy],
+                            relative_error=_math.sqrt(difference / energy),
+                        )
+                        break
+                    if fine_checks == 8:
+                        reason = "appearance_budget"
+                        break
+        checks["ambiguity_ms"] += (time.perf_counter() - started) * 1000
+        checks["appearance_checks"] += 1
+        if evidence is not None and len(checks["ambiguity_examples"]) < 8:
+            checks["ambiguity_examples"].append(evidence)
+        cache[point] = reason
+        return reason
+
+    def _photometric(self, previous, current, shape, start, endpoint, checks):
+        """Measure zero-mean 7x7 residual with a bilinear Q7 target patch.
+        使用双线性 Q7 目标块测量零均值 7x7 残差。
+        """
+        if not self.appearance:
+            return None, None
+        tick = time.perf_counter()
+        width, height = shape
+        x, y = int(_math.floor(endpoint[0])), int(_math.floor(endpoint[1]))
+        if not 3 <= x < width - 4 or not 3 <= y < height - 4:
+            return None, "patch_border"
+        fx, fy = endpoint[0] - x, endpoint[1] - y
+        target = []
+        for dy in range(-3, 4):
+            for dx in range(-3, 4):
+                index = (y + dy) * width + x + dx
+                upper = current[index] * (1 - fx) + current[index + 1] * fx
+                lower = (
+                    current[index + width] * (1 - fx) + current[index + width + 1] * fx
+                )
+                target.append(upper * (1 - fy) + lower * fy)
+        reference = self._patch(previous, width, start[0], start[1])
+        difference = self._energy([a - b for a, b in zip(reference, target)])
+        error = _math.sqrt(difference / 49)
+        reason = (
+            "low_texture"
+            if self._energy(target) < 49 * 16
+            else "photometric" if error > self.max_patch_error else None
+        )
+        checks["photometric_ms"] += (time.perf_counter() - tick) * 1000
+        checks["photometric_checks"] += 1
+        return error, reason
+
+    def _batch_appearance(
+        self, previous, current, shape, starts, endpoints, candidates, checks, cache
+    ):
+        """Keep the Python policy as a fallback; do not suppress native errors.
+        保留 Python 策略作为回退，不隐藏原生实现的异常。
+        """
+        if self._appearance_native is None:
+            return None
+        output = self._appearance_native(
+            previous,
+            current,
+            shape[0],
+            shape[1],
+            starts,
+            endpoints,
+            candidates,
+            self.max_patch_error,
+            self.ambiguity_ratio,
+            self.ambiguity_radius,
+        )
+        native_checks = output["checks"]
+        for name in (
+            "photometric_checks",
+            "appearance_checks",
+            "ambiguity_candidates",
+            "ambiguity_fine_checks",
+            "photometric_ms",
+            "ambiguity_ms",
+            "native_ms",
+        ):
+            checks[name] = checks.get(name, 0) + native_checks[name]
+        checks["native_calls"] = checks.get("native_calls", 0) + 1
+        checks["backend"] = native_checks["backend"]
+        remaining = 8 - len(checks["ambiguity_examples"])
+        checks["ambiguity_examples"].extend(
+            native_checks["ambiguity_examples"][:remaining]
+        )
+        for item in output["cache"]:
+            cache[tuple(item["point"])] = item["reason"]
+        return output["matches"]
+
+    def _prepare_lk(self, frame, data, reference, checks):
+        if not self.normalize_brightness:
+            return frame, reference, dict(enabled=False, offset=0)
+        tick = time.perf_counter()
+        stride = max(1, len(data) // 4096) | 1
+        sample = sorted(data[::stride])
+        location = (sample[len(sample) // 4] + sample[3 * len(sample) // 4]) / 2.0
+        reference = location if reference is None else reference
+        offset = int(_math.floor(reference - location + 0.5))
+        if abs(offset) <= 2:
+            offset = 0
+        if offset:
+            table = bytes(max(0, min(255, value + offset)) for value in range(256))
+            frame = ImageBuffer.from_bytes(
+                data.translate(table), frame.width, frame.height, "gray8"
+            )
+        checks["normalization_ms"] += (time.perf_counter() - tick) * 1000
+        return (
+            frame,
+            reference,
+            dict(
+                enabled=True,
+                offset=offset,
+                location=location,
+                reference=reference,
+                estimator="sample_quartile_midpoint",
+            ),
+        )
+
+    def reset(self):
+        """Release the retained frame and start a new identity sequence.
+        释放保留帧并开始新的轨迹编号序列。
+        """
+        with self._lock:
+            self._previous = None
+            self._previous_lk = None
+            self._previous_bytes = None
+            self._brightness_reference = None
+            self._shape = None
+            self._timestamp = None
+            self._clock_explicit = None
+            self._tracks = []
+            self._next_id = 0
+            self._velocity = (0.0, 0.0)
+
+    def _select(
+        self, frame, tracks, next_id, points=None, data=None, checks=None, cache=None
+    ):
+        selected = [dict(track) for track in tracks]
+        if len(selected) >= self.max_points:
+            return selected, next_id, 0
+        candidates = (
+            self._ive.st_corner(
+                frame,
+                min(500, self.max_points * 4),
+                self.min_distance,
+                self.quality_level,
+            )
+            if points is None
+            else points
+        )
+        distance2 = self.min_distance * self.min_distance
+        if self._appearance_native is not None and points is None:
+            # Precompute existing corner candidates; preserve selection and NMS order.
+            # 仅预计算已有角点候选，保持选点及 NMS 顺序。
+            batch = [
+                point
+                for point in candidates
+                if len(point) == 2
+                and all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in point
+                )
+                and self._inside(point, (frame.width, frame.height))
+                and tuple(point) not in cache
+                and not any(
+                    (point[0] - track["x"]) ** 2 + (point[1] - track["y"]) ** 2
+                    < distance2
+                    for track in selected
+                )
+            ]
+            if batch:
+                self._batch_appearance(
+                    b"", data, (frame.width, frame.height), [], [], batch, checks, cache
+                )
+        added = 0
+        for point in candidates:
+            if len(point) != 2:
+                raise ValueError("points must contain integer (x,y) pairs")
+            x, y = point
+            if (
+                isinstance(x, bool)
+                or isinstance(y, bool)
+                or not isinstance(x, int)
+                or not isinstance(y, int)
+            ):
+                raise ValueError("points must contain integer (x,y) pairs")
+            if not self._inside((x, y), (frame.width, frame.height)):
+                if points is not None:
+                    raise ValueError(
+                        "Initial points must satisfy the configured image border"
+                    )
+                continue
+            if any(
+                (x - track["x"]) ** 2 + (y - track["y"]) ** 2 < distance2
+                for track in selected
+            ):
+                continue
+            reason = self._appearance_at(
+                data, (frame.width, frame.height), (x, y), checks, cache
+            )
+            if reason is not None:
+                rejected = checks["selection_rejected"]
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            selected.append(
+                dict(
+                    id=next_id,
+                    x=float(x),
+                    y=float(y),
+                    dx=0.0,
+                    dy=0.0,
+                    vx=0.0,
+                    vy=0.0,
+                    age=1,
+                    error=None,
+                    fb_error=None,
+                    patch_error=None,
+                )
+            )
+            next_id, added = next_id + 1, added + 1
+            if len(selected) >= self.max_points:
+                break
+        return selected, next_id, added
+
+    def _flow(self, previous, current, points, initial):
+        vectors, errors = self._ive.lk_optical_flow_config(
+            previous,
+            current,
+            points,
+            self.max_level,
+            self.iterations,
+            self.min_eigenvalue,
+            self.epsilon,
+            initial,
+        )
+        if len(vectors) != len(points) or len(errors) != len(points):
+            raise RuntimeError("LK returned an unexpected number of vectors or errors")
+        return vectors, errors
+
+    def _endpoint(self, point, vector, error):
+        if vector.status != 0:
+            return None, "status"
+        dx, dy = float(vector.mv_x) / 128.0, float(vector.mv_y) / 128.0
+        residual = float(error) / 128.0
+        if (
+            not all(_math.isfinite(value) for value in (dx, dy, residual))
+            or residual < 0
+        ):
+            return None, "nonfinite"
+        if self.max_error is not None and residual > self.max_error:
+            return None, "residual"
+        return (point[0] + dx, point[1] + dy, residual), None
+
+    def update(self, frame, timestamp=None, points=None):
+        """Return independent track/loss dictionaries; points seeds the first frame.
+        返回独立的轨迹及丢点字典；points 仅用于首帧选点。
+        """
+        with self._lock:
+            update_started = time.perf_counter()
+            explicit = timestamp is not None
+            now = (
+                time.monotonic()
+                if timestamp is None
+                else self._number(timestamp, "timestamp")
+            )
+            if not frame.is_valid() or str(frame.format).lower() != "gray8":
+                raise ValueError("LKTracker requires a valid GRAY8 frame")
+            shape = (int(frame.width), int(frame.height))
+            if min(shape) < 64 or min(shape) <= self.border * 2:
+                raise ValueError("Frame is too small for LK or the configured border")
+            if self._timestamp is not None:
+                if explicit != self._clock_explicit:
+                    raise ValueError(
+                        "Do not mix explicit timestamps and the monotonic clock"
+                    )
+                if now <= self._timestamp:
+                    raise ValueError("timestamp must increase strictly")
+                if points is not None:
+                    raise ValueError("points may only seed the first frame after reset")
+            current = frame.copy()
+            lost, accepted = [], []
+            previous_tracks = self._tracks
+            dt = None if self._timestamp is None else now - self._timestamp
+            reset_reason = None
+            if self._shape is not None and shape != self._shape:
+                reset_reason = "size_changed"
+            elif (
+                dt is not None
+                and self.max_interval is not None
+                and dt > self.max_interval
+            ):
+                reset_reason = "time_gap"
+            if reset_reason is not None:
+                lost = [
+                    dict(id=track["id"], reason=reset_reason)
+                    for track in previous_tracks
+                ]
+                previous_tracks = []
+            checks = dict(
+                normalization_ms=0.0,
+                photometric_ms=0.0,
+                ambiguity_ms=0.0,
+                appearance_checks=0,
+                photometric_checks=0,
+                ambiguity_candidates=0,
+                ambiguity_fine_checks=0,
+                ambiguity_examples=[],
+                selection_rejected={},
+                backend="python" if self.appearance else "disabled",
+                native_calls=0,
+                native_ms=0.0,
+            )
+            current_bytes = (
+                current.data if self.appearance or self.normalize_brightness else None
+            )
+            reference = self._brightness_reference if reset_reason is None else None
+            current_lk, reference, normalization = self._prepare_lk(
+                current, current_bytes, reference, checks
+            )
+            appearance_cache = {}
+            eligible, source_points, initial_points = [], [], []
+            seeded = 0
+            if self._previous is not None and previous_tracks:
+                for track in previous_tracks:
+                    start = (self._pixel(track["x"]), self._pixel(track["y"]))
+                    vx, vy = (
+                        (track["vx"], track["vy"])
+                        if track["age"] > 1
+                        else self._velocity
+                    )
+                    predicted = (
+                        self._pixel(start[0] + vx * dt),
+                        self._pixel(start[1] + vy * dt),
+                    )
+                    if not self._inside(start, shape) or not self._inside(
+                        predicted, shape
+                    ):
+                        lost.append(dict(id=track["id"], reason="prediction_border"))
+                        continue
+                    if _math.hypot(vx * dt, vy * dt) > self.max_step:
+                        lost.append(dict(id=track["id"], reason="prediction_step"))
+                        continue
+                    eligible.append(track)
+                    source_points.append(start)
+                    initial_points.append(predicted)
+                if eligible:
+                    initial = (
+                        initial_points
+                        if any(track["age"] > 1 for track in eligible)
+                        else []
+                    )
+                    seeded = len(initial)
+                    vectors, errors = self._flow(
+                        self._previous_lk, current_lk, source_points, initial
+                    )
+                    forward, backward_points, backward_initial = [], [], []
+                    geometry = []
+                    forward_lost = []
+                    eligible_order = {
+                        track["id"]: index for index, track in enumerate(eligible)
+                    }
+                    for track, start, vector, error in zip(
+                        eligible, source_points, vectors, errors
+                    ):
+                        endpoint, reason = self._endpoint(start, vector, error)
+                        if reason is None:
+                            native_x, native_y, residual = endpoint
+                            x = track["x"] + native_x - start[0]
+                            y = track["y"] + native_y - start[1]
+                            rounded = (self._pixel(native_x), self._pixel(native_y))
+                            if not self._inside((x, y), shape) or not self._inside(
+                                rounded, shape
+                            ):
+                                reason = "border"
+                            elif (
+                                _math.hypot(x - track["x"], y - track["y"])
+                                > self.max_step
+                            ):
+                                reason = "step"
+                        if reason is not None:
+                            forward_lost.append(dict(id=track["id"], reason=reason))
+                            continue
+                        geometry.append((track, start, endpoint, (x, y), rounded))
+                    batch = (
+                        self._batch_appearance(
+                            self._previous_bytes,
+                            current_bytes,
+                            shape,
+                            [item[1] for item in geometry],
+                            [item[2][:2] for item in geometry],
+                            [],
+                            checks,
+                            appearance_cache,
+                        )
+                        if geometry
+                        else None
+                    )
+                    for index, (track, start, endpoint, (x, y), rounded) in enumerate(
+                        geometry
+                    ):
+                        if batch is not None:
+                            patch_error, reason = (
+                                batch[index]["error"],
+                                batch[index]["reason"],
+                            )
+                        else:
+                            patch_error, reason = self._photometric(
+                                self._previous_bytes,
+                                current_bytes,
+                                shape,
+                                start,
+                                endpoint[:2],
+                                checks,
+                            )
+                            if reason is None:
+                                reason = self._appearance_at(
+                                    current_bytes,
+                                    shape,
+                                    rounded,
+                                    checks,
+                                    appearance_cache,
+                                )
+                        if reason is not None:
+                            forward_lost.append(dict(id=track["id"], reason=reason))
+                            continue
+                        forward.append((track, start, endpoint, (x, y), patch_error))
+                        backward_points.append(rounded)
+                        backward_initial.append(start)
+                    lost.extend(
+                        sorted(
+                            forward_lost, key=lambda item: eligible_order[item["id"]]
+                        )
+                    )
+                    if forward:
+                        reverse, reverse_errors = self._flow(
+                            current_lk,
+                            self._previous_lk,
+                            backward_points,
+                            backward_initial,
+                        )
+                        for item, end_point, vector, error in zip(
+                            forward, backward_points, reverse, reverse_errors
+                        ):
+                            track, start, endpoint, tracked_point, patch_error = item
+                            back, reason = self._endpoint(end_point, vector, error)
+                            if reason is None:
+                                fb_error = _math.hypot(
+                                    endpoint[0] - start[0] + back[0] - end_point[0],
+                                    endpoint[1] - start[1] + back[1] - end_point[1],
+                                )
+                                if not self._inside(back[:2], shape):
+                                    reason = "backward_border"
+                                elif fb_error > self.fb_threshold:
+                                    reason = "forward_backward"
+                            if reason is not None:
+                                lost.append(
+                                    dict(
+                                        id=track["id"],
+                                        reason=(
+                                            "backward_" + reason
+                                            if reason
+                                            in ("status", "residual", "nonfinite")
+                                            else reason
+                                        ),
+                                    )
+                                )
+                                continue
+                            x, y = tracked_point
+                            residual = endpoint[2]
+                            dx, dy = x - track["x"], y - track["y"]
+                            accepted.append(
+                                dict(
+                                    id=track["id"],
+                                    x=x,
+                                    y=y,
+                                    dx=dx,
+                                    dy=dy,
+                                    vx=dx / dt,
+                                    vy=dy / dt,
+                                    age=track["age"] + 1,
+                                    error=residual,
+                                    fb_error=fb_error,
+                                    patch_error=patch_error,
+                                )
+                            )
+            velocity = (
+                (
+                    self._median([track["vx"] for track in accepted]),
+                    self._median([track["vy"] for track in accepted]),
+                )
+                if accepted
+                else (0.0, 0.0)
+            )
+            tracks, next_id, added = self._select(
+                current,
+                accepted,
+                self._next_id,
+                points,
+                current_bytes,
+                checks,
+                appearance_cache,
+            )
+            self._previous, self._shape = current, shape
+            self._previous_lk, self._previous_bytes = current_lk, (
+                current_bytes if self.appearance else None
+            )
+            self._brightness_reference = reference
+            self._timestamp, self._clock_explicit = now, explicit
+            self._tracks, self._next_id, self._velocity = tracks, next_id, velocity
+            return dict(
+                tracks=[dict(track) for track in tracks],
+                lost=lost,
+                added=added,
+                retained=len(accepted),
+                timestamp=now,
+                reset_reason=reset_reason,
+                prediction=dict(seeded=seeded, velocity=tuple(velocity)),
+                max_level=self.max_level,
+                appearance_enabled=self.appearance,
+                normalization=normalization,
+                checks=checks,
+                update_ms=(time.perf_counter() - update_started) * 1000,
+            )
 
 
 __all__ = [n for n in globals() if not n.startswith("_")]
