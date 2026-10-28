@@ -156,6 +156,9 @@ jobs:
           VISIONG_SDK_ROOT="${GITHUB_WORKSPACE}/_deps/luckfox-pico" \
           VISIONG_DEPS_ROOT="${GITHUB_WORKSPACE}/_stage" \
           ./scripts/build_visiong_hw_module.sh
+          strip_tool=$(sed -n 's/^CMAKE_STRIP:FILEPATH=//p' build/CMakeCache.txt)
+          test -x "${strip_tool}"
+          "${strip_tool}" --strip-debug drivers/visiong_hw/visiong_hw.ko
           cp -f drivers/visiong_hw/visiong_hw.ko build/visiong_hw.ko
 
       - name: Assemble binary release packages
@@ -166,6 +169,18 @@ jobs:
       - name: Validate binary artifacts
         run: |
           python3 ./scripts/check_release_archives.py dist/visiong_cpp.zip dist/visiong_python.zip
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import zipfile
+
+          build_root = os.environ["GITHUB_WORKSPACE"].encode()
+          for path in Path("dist").glob("*.zip"):
+              with zipfile.ZipFile(path) as archive:
+                  for name in archive.namelist():
+                      if not name.endswith("/") and build_root in archive.read(name):
+                          raise RuntimeError(f"Build directory found in {path.name}: {name}")
+          PY
 
       - name: Write release notes
         run: |
@@ -199,4 +214,5 @@ jobs:
           target_commitish: ${{ steps.release-source.outputs.sha }}
           body_path: dist/release-notes-${{ env.RELEASE_LABEL }}.md
           overwrite_files: true
+          draft: false
           files: dist/*.zip
