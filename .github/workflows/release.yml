@@ -57,6 +57,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Record release source
+        id: release-source
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install numeric reference dependency
+        run: python3 -m pip install numpy==1.26.4
 
       - name: Validate NanoTrack source guard
         run: |
@@ -183,7 +196,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_LABEL }}
           name: VisionG ${{ env.RELEASE_LABEL }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.release-source.outputs.sha }}
           body_path: dist/release-notes-${{ env.RELEASE_LABEL }}.md
           overwrite_files: true
           files: dist/*.zip
